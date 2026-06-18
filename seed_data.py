@@ -597,6 +597,10 @@ CATEGORY_DEFAULT_HOURS: dict[str, tuple[time, time] | None] = {
     "Couriers":                      (time( 8, 0), time(17, 0)),
     "Real Estate Services":          (time( 9, 0), time(17, 0)),
     "Residential Area-Building":     (time( 9, 0), time(17, 0)),
+    "Floor and Carpet":              (time( 9, 0), time(18, 0)),
+    "Home Improvement-Hardware Store": (time( 8, 0), time(18, 0)),
+    "Major Appliance":               (time( 9, 0), time(20, 0)),
+    "Office Supply and Services Store": (time( 8, 0), time(17, 0)),
     "Bus Stop":                      None,
     # ── F&B (additional) ─────────────────────────────────────────────────────
     "Fast Food":                     (time( 8, 0), time(22, 0)),
@@ -780,6 +784,10 @@ def _parse_hours_text(text: str) -> dict[int, tuple[time, time] | None]:
     if not text or not text.strip():
         return {}
 
+    norm = text.strip().lower()
+    if "24/7" in norm or norm in ("24 hours", "open 24 hours", "always open"):
+        return {wd: (time(0, 0), time(23, 59)) for wd in range(7)}
+
     schedule: dict[int, tuple[time, time] | None] = {}
     parts = [p.strip() for p in text.split(",")]
 
@@ -891,6 +899,7 @@ def read_batch_xlsx(xlsx_path: Path, batch_type: str) -> list[dict]:
             return ""
 
         if batch_type == "new":
+            id_val    = _s("supplier_poiid")
             name      = _s("poi_nm")
             lat       = _s("display_point_latitude")
             lon       = _s("display_point_longitude")
@@ -904,6 +913,7 @@ def read_batch_xlsx(xlsx_path: Path, batch_type: str) -> list[dict]:
             street    = _s("street_name")
             postal    = _s("postal_code")
         else:
+            id_val    = _s("ID")
             name      = _s("POI name")
             lat       = _s("displaylatitude")
             lon       = _s("displaylongitude")
@@ -944,6 +954,7 @@ def read_batch_xlsx(xlsx_path: Path, batch_type: str) -> list[dict]:
             "PHONE":             phone,
             "MOBILE":            mobile,
             "_schedule_override": sched_override,
+            "_xlsx_id":          id_val,
             "closed_from":       "",
             "batch_type":        f"xlsx-{batch_type}",   # "xlsx-new" or "xlsx-update"
             "status":            "ACTIVE",
@@ -1635,12 +1646,14 @@ def load_merchants_from_db(conn, csv_rows: list[dict]) -> list[dict]:
         schedule = sched_override if sched_override else {wd: resolve_hours(row, wd, category) for wd in range(7)}
         cf_raw = row.get("closed_from", "")
         cf_str = cf_raw.strip() if isinstance(cf_raw, str) else ""
-        bt     = row.get("batch_type", "").strip()
+        bt      = row.get("batch_type", "").strip()
+        xlsx_id = row.get("_xlsx_id", "")
         csv_schedule[name] = {
-            "category":   category,
-            "schedule":   schedule,
+            "category":    category,
+            "schedule":    schedule,
             "closed_from": date.fromisoformat(cf_str) if cf_str else None,
             "batch_type":  bt if bt else None,
+            "_xlsx_id":    xlsx_id if xlsx_id else None,
         }
 
     with conn.cursor() as cur:
@@ -1681,6 +1694,7 @@ def load_merchants_from_db(conn, csv_rows: list[dict]) -> list[dict]:
             "schedule":      sched.get("schedule", {}),
             "closed_from":   sched.get("closed_from"),
             "batch_type":    sched.get("batch_type"),
+            "_xlsx_id":      sched.get("_xlsx_id"),
         })
     return result
 
@@ -2043,8 +2057,8 @@ def _save_batch_excel_report(
     HDR_FILL  = PatternFill("solid", fgColor="1E2A3A")
     HDR_FONT  = Font(bold=True, color="FFFFFF", size=11)
     HDR_ALIGN = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    headers    = ["#", "POI Name", "Last Signal Update", "Proof (IMG)"]
-    col_widths = [4, 36, 28, 48]
+    headers    = ["#", "ID", "POI Name", "Last Signal Update", "Proof (IMG)"]
+    col_widths = [4, 36, 36, 28, 48]
     IMG_W, IMG_H, ROW_H = 320, 160, 122
 
     def _write_sheet(ws, records, sheet_title):
@@ -2058,16 +2072,17 @@ def _save_batch_excel_report(
             ws.column_dimensions[cell.column_letter].width = w
         CTR = Alignment(horizontal="center", vertical="center")
         MID = Alignment(vertical="center", wrap_text=True)
-        for row_idx, (seq_n, name, last_signal, jpeg_path) in enumerate(records, start=2):
+        for row_idx, (seq_n, name, last_signal, jpeg_path, xlsx_id) in enumerate(records, start=2):
             ws.row_dimensions[row_idx].height = ROW_H
-            ws.cell(row=row_idx, column=1, value=seq_n).alignment = CTR
-            ws.cell(row=row_idx, column=2, value=name).alignment = MID
-            ws.cell(row=row_idx, column=3, value=last_signal).alignment = CTR
+            ws.cell(row=row_idx, column=1, value=seq_n).alignment    = CTR
+            ws.cell(row=row_idx, column=2, value=xlsx_id).alignment  = MID
+            ws.cell(row=row_idx, column=3, value=name).alignment     = MID
+            ws.cell(row=row_idx, column=4, value=last_signal).alignment = CTR
             if jpeg_path and Path(jpeg_path).exists():
                 xl_img        = XLImage(str(jpeg_path))
                 xl_img.width  = IMG_W
                 xl_img.height = IMG_H
-                ws.add_image(xl_img, f"D{row_idx}")
+                ws.add_image(xl_img, f"E{row_idx}")
 
     ws_new = wb.active
     _write_sheet(ws_new, new_records, "NEW")
@@ -2121,7 +2136,7 @@ def generate_merchant_status_report(conn, merchants_info: list[dict]) -> None:
 
     seq = 1
     excel_records: list[tuple[int, str, str, "Path | None"]] = []
-    batch_records: list[tuple[int, str, str, "Path | None", str]] = []
+    batch_records: list[tuple[int, str, str, "Path | None", str, str]] = []
 
     with conn.cursor() as cur:
         for info in merchants_info:
@@ -2157,13 +2172,15 @@ def generate_merchant_status_report(conn, merchants_info: list[dict]) -> None:
                         now_wib=now_wib, output_dir=output_dir, seq=seq,
                     )
                     excel_records.append((seq, m_name, f"{ltf}  ({ago_s})", jpeg_path))
-                    bt = info.get("batch_type")
+                    bt      = info.get("batch_type")
+                    xlsx_id = info.get("_xlsx_id") or ""
                     if bt in ("xlsx-new", "xlsx-update"):
-                        batch_records.append((seq, m_name, f"{ltf}  ({ago_s})", jpeg_path, bt))
+                        batch_records.append((seq, m_name, f"{ltf}  ({ago_s})", jpeg_path, bt, xlsx_id))
                     seq += 1
                 else:
                     print("STATUS        : NO DATA")
-                    bt = info.get("batch_type")
+                    bt      = info.get("batch_type")
+                    xlsx_id = info.get("_xlsx_id") or ""
                     if bt in ("xlsx-new", "xlsx-update"):
                         jpeg_path = _save_card_jpeg(
                             merchant_name=m_name, status="INACTIVE", confidence=0.0,
@@ -2175,7 +2192,7 @@ def generate_merchant_status_report(conn, merchants_info: list[dict]) -> None:
                             now_wib=now_wib, output_dir=output_dir, seq=seq,
                         )
                         excel_records.append((seq, m_name, "—  (no data)", jpeg_path))
-                        batch_records.append((seq, m_name, "—  (no data)", jpeg_path, bt))
+                        batch_records.append((seq, m_name, "—  (no data)", jpeg_path, bt, xlsx_id))
                         seq += 1
                 continue
 
@@ -2281,15 +2298,16 @@ def generate_merchant_status_report(conn, merchants_info: list[dict]) -> None:
                 seq=seq,
             )
             excel_records.append((seq, m_name, f"{last_txn_fmt}  ({ago_str})", jpeg_path))
-            bt = info.get("batch_type")
+            bt      = info.get("batch_type")
+            xlsx_id = info.get("_xlsx_id") or ""
             if bt in ("xlsx-new", "xlsx-update"):
-                batch_records.append((seq, m_name, f"{last_txn_fmt}  ({ago_str})", jpeg_path, bt))
+                batch_records.append((seq, m_name, f"{last_txn_fmt}  ({ago_str})", jpeg_path, bt, xlsx_id))
             seq += 1
 
     xlsx_path = _save_excel_report(excel_records, output_dir, now_wib)
 
-    batch_new    = [(s, n, ls, jp) for s, n, ls, jp, bt in batch_records if bt == "xlsx-new"]
-    batch_update = [(s, n, ls, jp) for s, n, ls, jp, bt in batch_records if bt == "xlsx-update"]
+    batch_new    = [(s, n, ls, jp, xid) for s, n, ls, jp, bt, xid in batch_records if bt == "xlsx-new"]
+    batch_update = [(s, n, ls, jp, xid) for s, n, ls, jp, bt, xid in batch_records if bt == "xlsx-update"]
     if batch_new or batch_update:
         batch_path = _save_batch_excel_report(batch_new, batch_update, output_dir, now_wib)
     else:
