@@ -38,7 +38,7 @@ DB_CONFIG = {
 
 INPUT_DIR  = Path(__file__).parent / "input"
 CSV_PATH   = INPUT_DIR / "poi_edc.csv"
-DATE_START = date(2026, 5, 1)
+DATE_START = date(2025, 1, 1)
 DATE_END   = date.today()         # inclusive
 
 TERMINAL_MODELS = [
@@ -912,6 +912,96 @@ def read_batch_xlsx(xlsx_path: Path, batch_type: str) -> list[dict]:
             hno       = _s("house_number")
             street    = _s("street_name")
             postal    = _s("postal_code")
+            admin2    = _s("Admin 2")
+            admin3    = _normalize_city(_s("Admin 3"))
+            admin4    = _s("Admin 4")
+            admin5    = _s("Admin 5")
+            sched_override = _parse_hours_text(hours_raw) if hours_raw else None
+            closed_from_str = ""
+        elif batch_type == "delete":
+            id_val    = _s("supplier_poiid")
+            name      = _s("poi_nm")
+            lat       = _s("displaylatitude")
+            lon       = _s("displaylongitude")
+            rlat      = _s("routinglatitude")
+            rlon      = _s("routinglongitude")
+            category  = _s("primarycategorynm")
+            phone     = _s("PHONE")
+            mobile    = _s("MOBILE")
+            hno       = _s("hno")
+            street    = _s("streetname")
+            postal    = _s("postalcode")
+            admin2    = _s("admin2")
+            admin3    = _normalize_city(_s("admin3"))
+            admin4    = _s("admin4")
+            admin5    = _s("admin5")
+            # Hours: day-fraction columns (mondayopening/mondayclosing …)
+            # Normalize None → "" so get_day_window's .strip() calls don't fail
+            _norm_row = {k: ("" if v is None else str(v)) for k, v in row.items()}
+            raw_sched = {wd: get_day_window(_norm_row, wd) for wd in range(7)}
+            sched_override = {
+                wd: (raw_sched[wd] or CATEGORY_DEFAULT_HOURS.get(category))
+                for wd in range(7)
+            }
+            # Read closed_from column (ISO date string added to the xlsx)
+            cf_raw = row.get("closed_from")
+            if isinstance(cf_raw, datetime):
+                closed_from_str = cf_raw.strftime("%Y-%m-%d")
+            elif isinstance(cf_raw, date):
+                closed_from_str = cf_raw.isoformat()
+            elif isinstance(cf_raw, (int, float)):
+                closed_from_str = (
+                    datetime(1899, 12, 30) + timedelta(days=int(cf_raw))
+                ).strftime("%Y-%m-%d")
+            else:
+                closed_from_str = str(cf_raw).strip()[:10] if cf_raw else ""
+        elif batch_type == "5poi":
+            def _g(col):
+                v = row.get(col)
+                return "" if v is None else str(v).strip()
+            id_val   = _g("id")
+            name     = _g("poi_nm")
+            lat      = _g("display_point_latitude")
+            lon      = _g("display_point_longitude")
+            rlat     = lat
+            rlon     = lon
+            category = _g("category")
+            phone    = _g("phone number")
+            mobile   = _g("Mobile")
+            hno      = _g("house_number")
+            street   = _g("street_name")
+            postal   = _g("postal_code")
+            admin2   = _g("Admin 2")
+            admin3   = _normalize_city(_g("Admin 3"))
+            admin4   = _g("Admin 4")
+            admin5   = _g("Admin 5")
+            hours_text = _g("operating hours")
+            parsed_hrs = _parse_hours_text(hours_text) if hours_text else None
+            if parsed_hrs:
+                sched_override = parsed_hrs
+            else:
+                default = CATEGORY_DEFAULT_HOURS.get(category)
+                sched_override = {wd: default for wd in range(7)}
+            # Generate a random last-signal time = today within operational hours
+            _today = date.today()
+            _wd    = _today.weekday()
+            _win   = (sched_override or {}).get(_wd) if sched_override else None
+            if _win and _win[0] and _win[1]:
+                _open_s  = _win[0].hour * 3600 + _win[0].minute * 60
+                _close_s = _win[1].hour * 3600 + _win[1].minute * 60
+                if _close_s > _open_s:
+                    _sig_s = random.randint(_open_s, _close_s - 1)
+                else:
+                    _sig_s = _open_s
+            else:
+                _sig_s = random.randint(8 * 3600, 22 * 3600 - 1)
+            _sig_h, _sig_rem = divmod(_sig_s, 3600)
+            _sig_m, _sig_sec = divmod(_sig_rem, 60)
+            last_signal_str = datetime(_today.year, _today.month, _today.day,
+                                       _sig_h, _sig_m, _sig_sec).strftime("%Y-%m-%d %H:%M:%S")
+            is_realtime = (category.strip().lower() == "atm")
+            row_batch_type = "xlsx-realtime" if is_realtime else "xlsx-new"
+            closed_from_str = ""
         else:
             id_val    = _s("ID")
             name      = _s("POI name")
@@ -926,16 +1016,15 @@ def read_batch_xlsx(xlsx_path: Path, batch_type: str) -> list[dict]:
             hno       = _s("house_number")
             street    = _s("streetname")
             postal    = _s("postalcode")
+            admin2    = _s("Admin 2")
+            admin3    = _normalize_city(_s("Admin 3"))
+            admin4    = _s("Admin 4")
+            admin5    = _s("Admin 5")
+            sched_override = _parse_hours_text(hours_raw) if hours_raw else None
+            closed_from_str = ""
 
         if not name:
             continue
-
-        admin2 = _s("Admin 2")
-        admin3 = _normalize_city(_s("Admin 3"))
-        admin4 = _s("Admin 4")
-        admin5 = _s("Admin 5")
-
-        sched_override = _parse_hours_text(hours_raw) if hours_raw else None
 
         result.append({
             "name1":             name,
@@ -955,8 +1044,9 @@ def read_batch_xlsx(xlsx_path: Path, batch_type: str) -> list[dict]:
             "MOBILE":            mobile,
             "_schedule_override": sched_override,
             "_xlsx_id":          id_val,
-            "closed_from":       "",
-            "batch_type":        f"xlsx-{batch_type}",   # "xlsx-new" or "xlsx-update"
+            "closed_from":       closed_from_str,
+            "batch_type":        row_batch_type if batch_type == "5poi" else f"xlsx-{batch_type}",
+            "last_signal":       last_signal_str if batch_type == "5poi" else "",
             "status":            "ACTIVE",
         })
 
@@ -1979,6 +2069,70 @@ def _save_card_jpeg(
     return fname
 
 
+REALTIME_ACTIVE_DAYS = 90
+
+
+def _save_realtime_card_jpeg(
+    name: str,
+    status: str,
+    last_signal_fmt: str,
+    ago_str: str,
+    reasons: list,
+    now_wib,
+    output_dir: Path,
+    seq: int,
+) -> "Path | None":
+    """Render a simplified signal-only card for realtime (ATM/bank) POIs."""
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        return None
+
+    font_sm = _load_font(13)
+    font_md = _load_font(15)
+    font_lg = _load_font(18)
+    status_colour = _C_ACTIVE if status == "ACTIVE" else _C_INACTIVE
+
+    n_reason = len(reasons)
+    height = _PAD + _LH + 6 + _LH + (_LH * 2) + 10 + (_LH * n_reason) + _PAD + 20
+
+    img  = Image.new("RGB", (_CARD_W, max(height, 180)), _C_BG)
+    draw = ImageDraw.Draw(img)
+    draw.rounded_rectangle([8, 8, _CARD_W - 8, height - 8], radius=10,
+                            fill=_C_PANEL, outline=_C_BORDER, width=1)
+    y = _PAD
+    draw.text((_PAD, y), name, font=font_lg, fill=_C_NAME)
+    y += _LH + 6
+    draw.line([_PAD, y, _CARD_W - _PAD, y], fill=_C_DIVIDER, width=1)
+    y += 8
+
+    def _row(label, value, vc=_C_VALUE):
+        nonlocal y
+        draw.text((_PAD, y), f"{label:<14}", font=font_md, fill=_C_LABEL)
+        draw.text((_PAD + 14 * 9, y), value, font=font_md, fill=vc)
+        y += _LH
+
+    _row("STATUS",      status, status_colour)
+    _row("last_signal", f"{last_signal_fmt}  ({ago_str})")
+
+    if reasons:
+        y += 4
+        draw.line([_PAD, y, _CARD_W - _PAD, y], fill=_C_DIVIDER, width=1)
+        y += 8
+        for r in reasons:
+            draw.text((_PAD, y), f"  -  {r}", font=font_sm, fill=_C_REASON)
+            y += _LH
+
+    y += 6
+    draw.text((_PAD, y), f"Generated {now_wib.strftime('%Y-%m-%dT%H:%M:%S%z')}",
+              font=font_sm, fill=_C_BORDER)
+
+    safe_name = "".join(c if c.isalnum() or c in " -_" else "_" for c in name)
+    fname = output_dir / f"{seq:02d}_{safe_name[:40].strip()}_rt.jpg"
+    img.save(fname, "JPEG", quality=92)
+    return fname
+
+
 def _save_excel_report(
     records: list[tuple[int, str, str, "Path | None"]],
     output_dir: Path,
@@ -2039,12 +2193,14 @@ def _save_excel_report(
 
 
 def _save_batch_excel_report(
-    new_records:    list,
-    update_records: list,
+    new_records:      list,
+    update_records:   list,
+    delete_records:   list,
+    realtime_records: list,
     output_dir: Path,
     now_wib,
 ) -> "Path | None":
-    """Two-sheet Excel (NEW / UPDATE) for batch merchants only."""
+    """Four-sheet Excel (NEW / UPDATE / DELETE / REALTIME) for batch merchants."""
     try:
         from openpyxl import Workbook
         from openpyxl.drawing.image import Image as XLImage
@@ -2088,6 +2244,10 @@ def _save_batch_excel_report(
     _write_sheet(ws_new, new_records, "NEW")
     ws_upd = wb.create_sheet()
     _write_sheet(ws_upd, update_records, "UPDATE")
+    ws_del = wb.create_sheet()
+    _write_sheet(ws_del, delete_records, "DELETE")
+    ws_rt = wb.create_sheet()
+    _write_sheet(ws_rt, realtime_records, "REALTIME")
 
     xlsx_path = output_dir / "batch_activity_report.xlsx"
     wb.save(xlsx_path)
@@ -2101,6 +2261,56 @@ def _format_ago(hours_ago: float) -> str:
     if hours_ago < 24 * 365:
         return f"{hours_ago / 24:.0f}d ago"
     return f"{hours_ago / (24 * 365.25):.1f}yr ago"
+
+
+def _generate_realtime_records(output_dir: Path, seq_start: int, now_wib) -> "tuple[list, int]":
+    """Read list_realtime.csv, generate signal-only JPEG cards, return (records, next_seq)."""
+    import csv as _csv_mod
+    records = []
+    seq = seq_start
+    if not _REALTIME_CSV.exists():
+        return records, seq
+
+    with open(_REALTIME_CSV, newline="", encoding="utf-8") as f:
+        for row in _csv_mod.DictReader(f):
+            raw_name  = row.get("poi_nm", "")
+            street    = row.get("street", "")
+            clean_st  = re.sub(r"(?i)^jalan\s+", "", street).strip()
+            name      = f"{raw_name.upper()} {clean_st}".strip() if clean_st else raw_name.upper()
+            xlsx_id   = row.get("id", "")
+            sig_raw   = (row.get("last_signal") or "").strip()
+
+            sig_dt = None
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+                try:
+                    sig_dt = datetime.strptime(sig_raw, fmt).replace(tzinfo=WIB)
+                    break
+                except ValueError:
+                    pass
+
+            if sig_dt:
+                delta_h  = (now_wib - sig_dt).total_seconds() / 3600
+                ago_str  = _format_ago(delta_h)
+                days_ago = delta_h / 24
+                status   = "ACTIVE" if days_ago <= REALTIME_ACTIVE_DAYS else "INACTIVE"
+                sig_fmt  = f"~{sig_dt.strftime('%Y-%m-%d')}"
+                reasons  = [] if status == "ACTIVE" else [f"last signal {ago_str}"]
+            else:
+                ago_str = "unknown"
+                status  = "INACTIVE"
+                sig_fmt = sig_raw or "—"
+                reasons = ["signal date unavailable"]
+
+            jpeg_path = _save_realtime_card_jpeg(
+                name=name, status=status,
+                last_signal_fmt=sig_fmt, ago_str=ago_str,
+                reasons=reasons, now_wib=now_wib,
+                output_dir=output_dir, seq=seq,
+            )
+            records.append((seq, name, f"{sig_fmt}  ({ago_str})", jpeg_path, xlsx_id))
+            seq += 1
+
+    return records, seq
 
 
 def generate_merchant_status_report(conn, merchants_info: list[dict]) -> None:
@@ -2174,14 +2384,14 @@ def generate_merchant_status_report(conn, merchants_info: list[dict]) -> None:
                     excel_records.append((seq, m_name, f"{ltf}  ({ago_s})", jpeg_path))
                     bt      = info.get("batch_type")
                     xlsx_id = info.get("_xlsx_id") or ""
-                    if bt in ("xlsx-new", "xlsx-update"):
+                    if bt in ("xlsx-new", "xlsx-update", "xlsx-delete"):
                         batch_records.append((seq, m_name, f"{ltf}  ({ago_s})", jpeg_path, bt, xlsx_id))
                     seq += 1
                 else:
                     print("STATUS        : NO DATA")
                     bt      = info.get("batch_type")
                     xlsx_id = info.get("_xlsx_id") or ""
-                    if bt in ("xlsx-new", "xlsx-update"):
+                    if bt in ("xlsx-new", "xlsx-update", "xlsx-delete"):
                         jpeg_path = _save_card_jpeg(
                             merchant_name=m_name, status="INACTIVE", confidence=0.0,
                             last_txn_fmt="—", ago_str="no data",
@@ -2300,7 +2510,7 @@ def generate_merchant_status_report(conn, merchants_info: list[dict]) -> None:
             excel_records.append((seq, m_name, f"{last_txn_fmt}  ({ago_str})", jpeg_path))
             bt      = info.get("batch_type")
             xlsx_id = info.get("_xlsx_id") or ""
-            if bt in ("xlsx-new", "xlsx-update"):
+            if bt in ("xlsx-new", "xlsx-update", "xlsx-delete"):
                 batch_records.append((seq, m_name, f"{last_txn_fmt}  ({ago_str})", jpeg_path, bt, xlsx_id))
             seq += 1
 
@@ -2308,8 +2518,12 @@ def generate_merchant_status_report(conn, merchants_info: list[dict]) -> None:
 
     batch_new    = [(s, n, ls, jp, xid) for s, n, ls, jp, bt, xid in batch_records if bt == "xlsx-new"]
     batch_update = [(s, n, ls, jp, xid) for s, n, ls, jp, bt, xid in batch_records if bt == "xlsx-update"]
-    if batch_new or batch_update:
-        batch_path = _save_batch_excel_report(batch_new, batch_update, output_dir, now_wib)
+    batch_delete = [(s, n, ls, jp, xid) for s, n, ls, jp, bt, xid in batch_records if bt == "xlsx-delete"]
+    realtime_records, seq = _generate_realtime_records(output_dir, seq, now_wib)
+    if batch_new or batch_update or batch_delete or realtime_records:
+        batch_path = _save_batch_excel_report(
+            batch_new, batch_update, batch_delete, realtime_records, output_dir, now_wib
+        )
     else:
         batch_path = None
 
@@ -2326,8 +2540,11 @@ def generate_merchant_status_report(conn, merchants_info: list[dict]) -> None:
 # MAIN
 # ──────────────────────────────────────────────────────────────────────────────
 
-_BATCH_NEW_XLSX = INPUT_DIR / "list_new_edc.xlsx"
-_BATCH_UPD_XLSX = INPUT_DIR / "list_update_edc.xlsx"
+_BATCH_NEW_XLSX  = INPUT_DIR / "list_new_edc.xlsx"
+_BATCH_UPD_XLSX  = INPUT_DIR / "list_update_edc.xlsx"
+_BATCH_DEL_XLSX  = INPUT_DIR / "list_delete_edc.xlsx"
+_BATCH_5POI_XLSX = INPUT_DIR / "5_poi_dims.xlsx"
+_REALTIME_CSV    = INPUT_DIR / "list_realtime.csv"
 
 
 def _load_xlsx_supplement(csv_rows: list[dict]) -> int:
@@ -2344,6 +2561,15 @@ def _load_xlsx_supplement(csv_rows: list[dict]) -> int:
         rows = read_batch_xlsx(_BATCH_UPD_XLSX, "update")
         csv_rows.extend(rows)
         count += len(rows)
+    if _BATCH_DEL_XLSX.exists():
+        rows = read_batch_xlsx(_BATCH_DEL_XLSX, "delete")
+        csv_rows.extend(rows)
+        count += len(rows)
+    if _BATCH_5POI_XLSX.exists():
+        rows_5poi = read_batch_xlsx(_BATCH_5POI_XLSX, "5poi")
+        non_realtime = [r for r in rows_5poi if r.get("batch_type") != "xlsx-realtime"]
+        csv_rows.extend(non_realtime)
+        count += len(non_realtime)
     return count
 
 
@@ -2482,6 +2708,7 @@ def main() -> None:
 
         print("[1/7] Reading batch xlsx files...")
         batch_rows: list[dict] = []
+        del_rows:   list[dict] = []
         if new_xlsx.exists():
             nr = read_batch_xlsx(new_xlsx, "new")
             print(f"      list_new_edc.xlsx   : {len(nr)} rows")
@@ -2494,6 +2721,34 @@ def main() -> None:
             batch_rows.extend(ur)
         else:
             print(f"      list_update_edc.xlsx: not found — skipped")
+        if _BATCH_DEL_XLSX.exists():
+            del_rows = read_batch_xlsx(_BATCH_DEL_XLSX, "delete")
+            print(f"      list_delete_edc.xlsx: {len(del_rows)} rows")
+            batch_rows.extend(del_rows)
+        else:
+            print(f"      list_delete_edc.xlsx: not found — skipped")
+        if _BATCH_5POI_XLSX.exists():
+            all_5poi    = read_batch_xlsx(_BATCH_5POI_XLSX, "5poi")
+            rt_rows     = [r for r in all_5poi if r.get("batch_type") == "xlsx-realtime"]
+            new_5poi    = [r for r in all_5poi if r.get("batch_type") != "xlsx-realtime"]
+            print(f"      5_poi_dims.xlsx     : {len(new_5poi)} new POI, {len(rt_rows)} realtime")
+            batch_rows.extend(new_5poi)
+            if rt_rows:
+                import csv as _csv_mod
+                with open(_REALTIME_CSV, "w", newline="", encoding="utf-8") as _rtf:
+                    _w = _csv_mod.DictWriter(_rtf, fieldnames=["id", "poi_nm", "last_signal", "category", "street"])
+                    _w.writeheader()
+                    for _r in rt_rows:
+                        _w.writerow({
+                            "id":          _r.get("_xlsx_id", ""),
+                            "poi_nm":      _r.get("name1", ""),
+                            "last_signal": _r.get("last_signal", ""),
+                            "category":    _r.get("primarycategorynm", ""),
+                            "street":      _r.get("streetname", ""),
+                        })
+                print(f"      list_realtime.csv   : {len(rt_rows)} rows written")
+        else:
+            print(f"      5_poi_dims.xlsx     : not found — skipped")
 
         if not batch_rows:
             print("      No batch rows loaded — nothing to do.")
@@ -2535,7 +2790,34 @@ def main() -> None:
         batch_names = {r.get("name1", "").strip() for r in batch_rows}
         batch_info_only = [m for m in all_batch_info if m["merchant_name"] in batch_names]
 
-        # Find batch merchants that have no transactions yet
+        # Prune post-closure transactions for delete merchants
+        del_names = {r.get("name1", "").strip() for r in del_rows}
+        del_info  = [m for m in all_batch_info if m["merchant_name"] in del_names]
+        if del_info:
+            print(f"      Pruning post-closure transactions for {len(del_info)} deleted merchant(s)...")
+            with conn.cursor() as cur:
+                for m_info in del_info:
+                    cf = m_info.get("closed_from")
+                    if not cf:
+                        continue
+                    close_ts = datetime.combine(cf, time(0, 0))
+                    cur.execute(
+                        "DELETE FROM transaction_log WHERE transaction_id IN "
+                        "(SELECT transaction_id FROM transactions "
+                        " WHERE merchant_id = %s AND transaction_time >= %s)",
+                        (m_info["merchant_id"], close_ts),
+                    )
+                    cur.execute(
+                        "DELETE FROM transactions WHERE merchant_id = %s AND transaction_time >= %s",
+                        (m_info["merchant_id"], close_ts),
+                    )
+                    cur.execute(
+                        "DELETE FROM settlement WHERE merchant_id = %s AND settlement_date >= %s",
+                        (m_info["merchant_id"], cf),
+                    )
+            conn.commit()
+
+        # Find batch merchants that have no transactions yet (checked after prune)
         with conn.cursor() as cur:
             cur.execute("SELECT merchant_id FROM transactions GROUP BY merchant_id")
             has_txn = {r[0] for r in cur.fetchall()}
