@@ -931,17 +931,11 @@ def load_merchants_from_db(conn, csv_rows: list[dict]) -> list[dict]:
 
 
 def filter_new_csv_rows(conn, csv_rows: list[dict]) -> list[dict]:
-    """Return only rows not already in the merchants table (matched by name or reference)."""
+    """Return only rows whose name1 is not already in the merchants table."""
     with conn.cursor() as cur:
-        cur.execute("SELECT merchant_name, reference FROM merchants")
-        rows = cur.fetchall()
-    existing_names = {r[0] for r in rows}
-    existing_refs  = {r[1] for r in rows if r[1]}
-    return [
-        r for r in csv_rows
-        if r.get("name1", "").strip() not in existing_names
-        and r.get("_xlsx_id", "").strip() not in existing_refs
-    ]
+        cur.execute("SELECT merchant_name FROM merchants")
+        existing = {r[0] for r in cur.fetchall()}
+    return [r for r in csv_rows if r.get("name1", "").strip() not in existing]
 
 
 def get_merchant_idx_offset(conn) -> int:
@@ -1975,6 +1969,24 @@ def main() -> None:
             merchants_info = [m for m in merchants_info if m["merchant_id"] not in _new_ids]
         card_ids       = load_cards_from_db(conn)
         print(f"      {len(merchants_info)} merchants, {len(card_ids)} cards.")
+
+        # Merchants already in DB but with no transactions need full history, not just append window.
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT m.merchant_id FROM merchants m
+                LEFT JOIN transactions t ON t.merchant_id = m.merchant_id
+                WHERE t.merchant_id IS NULL
+            """)
+            _empty_ids = {r[0] for r in cur.fetchall()}
+        if _empty_ids:
+            _empty_info    = [m for m in merchants_info if m["merchant_id"] in _empty_ids]
+            merchants_info = [m for m in merchants_info if m["merchant_id"] not in _empty_ids]
+            print(f"      {len(_empty_info)} merchants have no transactions — backfilling {DATE_START} → {DATE_END}.")
+            reset_trace_seq(conn)
+            generate_and_insert_transactions(
+                conn, _empty_info, card_ids, qris_issuer_ids,
+                start_date=DATE_START, end_date=DATE_END,
+            )
 
         print("[4/4] Generating and inserting transactions...")
         reset_trace_seq(conn)
