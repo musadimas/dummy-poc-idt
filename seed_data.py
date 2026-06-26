@@ -1540,7 +1540,8 @@ def generate_merchant_status_report(conn, merchants_info: list[dict]) -> None:
                 closed_from_val = info.get("closed_at") or info.get("closed_from")
                 if closed_from_val:
                     # Closed before the seeded period — synthesise ago from the closure date
-                    h_ago = (ref_time - datetime.combine(closed_from_val, time(23, 59, 59)).replace(tzinfo=WIB)).total_seconds() / 3600
+                    _closed_dt = datetime.combine(closed_from_val, time(23, 59, 59)).replace(tzinfo=WIB)
+                    h_ago = max((now_wib - _closed_dt).total_seconds() / 3600, 0.0)
                     ago_s = _format_ago(h_ago)
                     ltf   = f"~{closed_from_val}"
                     print(f"STATUS        : {'INACTIVE':<10} (permanently closed)")
@@ -1581,8 +1582,9 @@ def generate_merchant_status_report(conn, merchants_info: list[dict]) -> None:
                         seq += 1
                 continue
 
-            last_txn_wib = last_txn_utc.astimezone(WIB)
-            hours_ago    = (ref_time - last_txn_wib).total_seconds() / 3600
+            last_txn_wib      = last_txn_utc.astimezone(WIB)
+            hours_ago         = (ref_time - last_txn_wib).total_seconds() / 3600
+            hours_ago_display = max((now_wib - last_txn_wib).total_seconds() / 3600, 0.0)
 
             # ── transaction counts (approved SALE only) ────────────────────
             cur.execute("""
@@ -1635,13 +1637,13 @@ def generate_merchant_status_report(conn, merchants_info: list[dict]) -> None:
             status = "ACTIVE" if hours_ago <= 90 * 24 else "INACTIVE"
 
             # ── format helpers ─────────────────────────────────────────────
-            ago_str      = _format_ago(hours_ago)
+            ago_str      = _format_ago(hours_ago_display)
             last_txn_fmt = last_txn_wib.strftime("%Y-%m-%dT%H:%M:%S%z")
 
             # ── reason bullets ─────────────────────────────────────────────
             reasons: list[str] = []
             if hours_ago <= 72:
-                reasons.append(f"last txn {int(hours_ago)}h ago (<= 72h)")
+                reasons.append(f"last txn {_format_ago(hours_ago_display)} (<= 72h)")
             if active_days >= _WINDOW_DAYS * 0.8:
                 reasons.append(f"{active_days}/{_WINDOW_DAYS} active days, max gap {max_gap}d")
             if c30d >= 50:
@@ -1932,6 +1934,18 @@ def main() -> None:
         print("[2/4] Loading reference data (QRIS issuers)...")
         qris_issuer_ids = load_qris_issuers(conn)
 
+        print("[2b/4] Checking for new merchants in list_edc.csv...")
+        _new_rows = filter_new_csv_rows(conn, csv_rows)
+        if _new_rows:
+            print(f"      Found {len(_new_rows)} new merchants — inserting...")
+            _aq_ids   = load_acquirers(conn)
+            _area_map = insert_admin_areas(conn, _new_rows)
+            insert_merchants_and_terminals(conn, _new_rows, _aq_ids, _area_map)
+            _sync_merchant_data(conn)
+            print(f"      {len(_new_rows)} merchants inserted and synced.")
+        else:
+            print("      No new merchants.")
+
         print("[3/4] Loading merchants + cards from DB...")
         merchants_info = load_merchants_from_db(conn, csv_rows)
         card_ids       = load_cards_from_db(conn)
@@ -2080,6 +2094,9 @@ def main() -> None:
 
     print("[7/7] Generating transactions, settlement, and audit logs...")
     generate_and_insert_transactions(conn, merchants_info, card_ids, qris_issuer_ids)
+
+    _sync_merchant_data(conn)
+    merchants_info = load_merchants_from_db(conn, csv_rows)
 
     print("\nRow count verification:")
     with conn.cursor() as cur:

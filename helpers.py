@@ -312,11 +312,21 @@ def _resolve_admin_tuple(row: dict) -> tuple[str | None, str | None, str | None]
 
 
 def _format_ago(hours_ago: float) -> str:
-    """Format an elapsed-hours value as 'Xh ago', 'Xd ago', or 'X.Xyr ago'."""
-    if hours_ago < 24:
-        return f"{hours_ago:.1f}h ago"
-    if hours_ago < 24 * 365:
-        return f"{hours_ago / 24:.0f}d ago"
+    """Human-readable relative time: 'just now', 'Xm ago', 'Xh ago', 'Xd ago', 'Xmo ago', 'X.Xyr ago'."""
+    minutes = round(hours_ago * 60)
+    if minutes < 1:
+        return "just now"
+    if minutes < 60:
+        return f"{minutes}m ago"
+    hours = round(hours_ago)
+    if hours < 24:
+        return f"{hours}h ago"
+    days = round(hours_ago / 24)
+    if days < 30:
+        return f"{days}d ago"
+    months = round(days / 30.4)
+    if months < 12:
+        return f"{months}mo ago"
     return f"{hours_ago / (24 * 365.25):.1f}yr ago"
 
 
