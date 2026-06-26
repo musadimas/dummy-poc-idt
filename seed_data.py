@@ -41,6 +41,12 @@ CSV_PATH   = INPUT_DIR / "poi_edc.csv"
 DATE_START = date(2025, 1, 1)
 DATE_END   = date.today()         # inclusive
 
+# ── Google Drive upload ───────────────────────────────────────────────────────
+GDRIVE_FOLDER_ID   = ""           # paste your Drive folder ID here
+GDRIVE_CREDENTIALS = Path(__file__).parent / "credentials.json"
+GDRIVE_TOKEN       = Path(__file__).parent / "token.json"
+GDRIVE_SCOPES      = ["https://www.googleapis.com/auth/drive.file"]
+
 TERMINAL_MODELS = [
     "Verifone VX520",
     "Verifone V240m",
@@ -2538,6 +2544,79 @@ def generate_merchant_status_report(conn, merchants_info: list[dict]) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# GOOGLE DRIVE UPLOAD
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _get_gdrive_service():
+    """Return an authenticated Google Drive API v3 service object."""
+    from google.oauth2.credentials import Credentials
+    from google_auth_oauthlib.flow import InstalledAppFlow
+    from google.auth.transport.requests import Request
+    from googleapiclient.discovery import build
+
+    creds = None
+    if GDRIVE_TOKEN.exists():
+        creds = Credentials.from_authorized_user_file(str(GDRIVE_TOKEN), GDRIVE_SCOPES)
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(str(GDRIVE_CREDENTIALS), GDRIVE_SCOPES)
+            creds = flow.run_local_server(port=0)
+        GDRIVE_TOKEN.write_text(creds.to_json())
+    return build("drive", "v3", credentials=creds)
+
+
+def _upload_to_gdrive(output_dir: Path) -> None:
+    """Upload Excel reports from output_dir into a dated subfolder on Google Drive."""
+    from googleapiclient.http import MediaFileUpload
+
+    if not GDRIVE_FOLDER_ID:
+        print("  [gdrive] GDRIVE_FOLDER_ID not set — skipping upload.")
+        return
+    if not GDRIVE_CREDENTIALS.exists():
+        print(f"  [gdrive] credentials.json not found at {GDRIVE_CREDENTIALS} — skipping.")
+        return
+
+    service = _get_gdrive_service()
+    date_folder = output_dir.name   # e.g. "20260624"
+
+    # Find or create a dated subfolder inside the designated parent folder
+    q = (f"name='{date_folder}' and "
+         f"mimeType='application/vnd.google-apps.folder' and "
+         f"'{GDRIVE_FOLDER_ID}' in parents and trashed=false")
+    res = service.files().list(q=q, fields="files(id)").execute()
+    if res["files"]:
+        sub_id = res["files"][0]["id"]
+    else:
+        meta = {
+            "name": date_folder,
+            "mimeType": "application/vnd.google-apps.folder",
+            "parents": [GDRIVE_FOLDER_ID],
+        }
+        sub_id = service.files().create(body=meta, fields="id").execute()["id"]
+        print(f"  [gdrive] Created folder : {date_folder}")
+
+    mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    for fname in ("merchant_activity_report.xlsx", "batch_activity_report.xlsx"):
+        fpath = output_dir / fname
+        if not fpath.exists():
+            continue
+        media = MediaFileUpload(str(fpath), mimetype=mime, resumable=True)
+        q2 = f"name='{fname}' and '{sub_id}' in parents and trashed=false"
+        existing = service.files().list(q=q2, fields="files(id)").execute()["files"]
+        if existing:
+            service.files().update(fileId=existing[0]["id"], media_body=media).execute()
+            print(f"  [gdrive] Updated  : {fname}")
+        else:
+            service.files().create(
+                body={"name": fname, "parents": [sub_id]},
+                media_body=media, fields="id",
+            ).execute()
+            print(f"  [gdrive] Uploaded : {fname}")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # MAIN
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -2586,8 +2665,27 @@ def main() -> None:
     reset_mode        = "--reset"          in sys.argv
     add_merchants_mode = "--add-merchants" in sys.argv
     batch_seed_mode   = "--batch-seed"     in sys.argv
+    upload_mode       = "--upload"         in sys.argv
 
     conn = get_connection()
+
+    if upload_mode:
+        reports_root = Path(__file__).parent / "reports"
+        # Pick the most recently modified YYYYMMDD subfolder
+        candidates = sorted(
+            [p for p in reports_root.iterdir() if p.is_dir() and p.name.isdigit()],
+            key=lambda p: p.stat().st_mtime, reverse=True,
+        ) if reports_root.exists() else []
+        if not candidates:
+            print(f"  No report folders found under {reports_root}")
+            print(f"  Run --report or --batch-seed first to generate the Excel files.")
+            conn.close()
+            return
+        output_dir = candidates[0]
+        print(f"[upload] Uploading Excel reports from {output_dir} ...")
+        _upload_to_gdrive(output_dir)
+        conn.close()
+        return
 
     # Auto-detect: if no explicit mode and DB already has data → append instead of wipe
     if not any([reset_mode, purge_mode, append_mode, report_mode,

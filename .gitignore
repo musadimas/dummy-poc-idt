@@ -5,3 +5,5 @@ venv
 .venv
 reports/
 input/
+credentials.json
+token.json
