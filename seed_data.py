@@ -1948,20 +1948,6 @@ def main() -> None:
         else:
             print("      No new merchants.")
 
-        if already_current:
-            if not _new_rows:
-                print(f"      Already up to date (last date: {append_start - timedelta(days=1)}).")
-                conn.close()
-                return
-            print("\nGenerating merchant activity report...")
-            merchants_info = load_merchants_from_db(conn, csv_rows)
-            generate_merchant_status_report(conn, merchants_info)
-            conn.close()
-            return
-
-        print(f"      Appending from {append_start} → {DATE_END} "
-              f"({(DATE_END - append_start).days + 1} days).")
-
         print("[3/4] Loading merchants + cards from DB...")
         merchants_info = load_merchants_from_db(conn, csv_rows)
         # Exclude newly inserted merchants — they already have DATE_START→DATE_END above.
@@ -1987,6 +1973,19 @@ def main() -> None:
                 conn, _empty_info, card_ids, qris_issuer_ids,
                 start_date=DATE_START, end_date=DATE_END,
             )
+
+        if already_current:
+            if not _new_rows and not _empty_ids:
+                print(f"      Already up to date (last date: {append_start - timedelta(days=1)}).")
+                conn.close()
+                return
+            print("\nGenerating merchant activity report...")
+            generate_merchant_status_report(conn, load_merchants_from_db(conn, csv_rows))
+            conn.close()
+            return
+
+        print(f"      Appending from {append_start} → {DATE_END} "
+              f"({(DATE_END - append_start).days + 1} days).")
 
         print("[4/4] Generating and inserting transactions...")
         reset_trace_seq(conn)
