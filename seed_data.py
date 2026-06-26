@@ -135,8 +135,8 @@ def _sync_merchant_data(conn) -> None:
             if m_id is None:
                 continue
             cur.execute(
-                "UPDATE merchants SET reference = %s WHERE merchant_id = %s AND (reference IS NULL OR reference != %s)",
-                (csv_id, m_id, csv_id),
+                "UPDATE merchants SET reference = %s WHERE merchant_id = %s AND reference IS NULL",
+                (csv_id, m_id),
             )
             updated_ref += cur.rowcount
 
