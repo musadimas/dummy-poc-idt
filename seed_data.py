@@ -1745,7 +1745,8 @@ def load_merchants_from_db(conn, csv_rows: list[dict]) -> list[dict]:
         cf_str = cf_raw.strip() if isinstance(cf_raw, str) else ""
         bt      = row.get("batch_type", "").strip()
         xlsx_id = (row.get("_xlsx_id", "") or row.get("supplier_poiid", "")
-                   or row.get("ID", "") or row.get("id", ""))
+                   or row.get("ID", "") or row.get("id", "")
+                   or row.get("placeid", ""))
         csv_schedule[name] = {
             "category":    category,
             "schedule":    schedule,
