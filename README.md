@@ -1,42 +1,61 @@
 # EDC Transaction POC
 
-A proof-of-concept PostgreSQL database for Indonesian EDC (Electronic Data Capture) transaction processing, built around real Points of Interest data from Depok/Bogor area.
+Proof-of-concept database PostgreSQL untuk pemrosesan transaksi EDC (Electronic Data Capture) di Indonesia, dibangun berdasarkan data Points of Interest (POI) nyata. Seeder menghasilkan data transaksi sintetis yang realistis lengkap dengan laporan aktivitas kartu JPEG dan laporan batch Excel.
 
 ---
 
-## Project Structure
+## Struktur Proyek
 
 ```
 poc-edc/
-├── schema.sql        # DDL — all tables, indexes, views, static seed data
-├── seed_data.py      # Python seeder — generates realistic transactions from poi_edc.csv
-├── queries.sql       # Analytical SQL queries with date-range filters
-├── poi_edc.csv       # Source POI data (29 active merchants)
+├── seed_data.py                  # Seeder utama — generate transaksi dari data POI
+├── schema.sql                    # DDL — semua tabel, indeks, view, data referensi
+├── queries.sql                   # Query SQL analitik dengan filter rentang tanggal
+├── input/
+│   ├── poi_edc.csv               # Data POI utama (merchant aktif)
+│   ├── list_new_edc.xlsx         # Merchant baru untuk di-insert ke DB
+│   ├── list_update_edc.xlsx      # Merchant yang datanya diperbarui
+│   ├── list_delete_edc.xlsx      # Merchant yang sudah tutup/dihapus
+│   ├── list_batch.xlsx           # Data campuran: ATM (realtime) + merchant baru
+│   └── list_realtime.csv         # (Di-generate otomatis) tracking sinyal ATM
 └── reports/
-    └── YYYYMMDD/     # JPEG activity cards generated per run (one file per merchant)
+    └── YYYYMMDD/
+        ├── *.jpg                 # Kartu aktivitas JPEG per merchant
+        ├── merchant_activity_report.xlsx
+        └── batch_activity_report.xlsx
 ```
 
 ---
 
-## Prerequisites
+## Prasyarat
 
 - PostgreSQL 13+
 - Python 3.9+
-- `psycopg2-binary` — database driver
-- `Pillow` — JPEG card generation
-- `openpyxl` — Excel report generation
+- `psycopg2-binary` — driver database
+- `Pillow` — generate kartu JPEG
+- `openpyxl` — baca/tulis laporan Excel
+
+```bash
+pip install psycopg2-binary Pillow openpyxl
+```
 
 ---
 
-## Quick Start
+## Setup Awal
 
-### 1. Create the database and apply schema
+### 1. Buat database dan terapkan skema
 
 ```bash
-python -m venv venv && source venv/Scripts/activate && pip install psycopg2-binary Pillow && PGPASSWORD=Manualbrew1 psql -U postgres -c "CREATE DATABASE edtransmap;" && PGPASSWORD=Manualbrew1 psql -U postgres -d edtransmap -f schema.sql
+python -m venv venv
+source venv/Scripts/activate          # Windows
+# source venv/bin/activate            # Linux/Mac
+pip install psycopg2-binary Pillow openpyxl
+
+PGPASSWORD=Manualbrew1 psql -U postgres -c "CREATE DATABASE edtransmap;"
+PGPASSWORD=Manualbrew1 psql -U postgres -d edtransmap -f schema.sql
 ```
 
-### 2. Seed the data
+### 2. Seed data awal
 
 ```bash
 python seed_data.py
@@ -44,229 +63,281 @@ python seed_data.py
 
 ---
 
-## Seeder Modes
+## Mode Seeder
 
-| Command | Behaviour |
+| Perintah | Fungsi |
 |---|---|
-| `python seed_data.py` | Smart default — if DB already has data, appends from the last transaction date to `DATE_END`; if DB is empty, performs an initial full seed |
-| `python seed_data.py --reset` | Full reset — truncates all tables and re-seeds from scratch (explicit wipe required) |
-| `python seed_data.py --purge` | Date-range purge — deletes only transactions/settlement for `DATE_START`–`DATE_END`, keeps merchants/cards/admin areas, then re-seeds transactions |
-| `python seed_data.py --report` | Report only — skips all seeding, queries existing data, prints console cards and saves JPEGs |
-| `python seed_data.py --append` | Append — finds the last transaction date already in the DB, seeds only from the next day up to `DATE_END`, and generates the report. Never touches existing rows. |
-| `python seed_data.py --prune-closed` | Closed-merchant prune — reads `closed_from` dates from `poi_edc.csv` and deletes all transaction/settlement data on or after each merchant's closure date, then generates a fresh report |
-| `python seed_data.py --batch-seed` | Batch seed — reads `list_new_edc.xlsx` (sheet "new") and `list_update_edc.xlsx` (sheet "update"), inserts only merchants not already in the DB, generates transactions for them, and produces a two-sheet `batch_activity_report.xlsx` alongside the full report |
-| `python seed_data.py --add-merchants` | Add merchants — inserts only merchants from `poi_edc.csv` not already in the DB, then generates their transactions and report |
-
-After seeding (or with `--report`), the script prints a merchant activity health card for every POI and saves a JPEG per merchant to `reports/YYYYMMDD/`.
+| `python seed_data.py` | **Default cerdas** — jika DB sudah ada data, append dari tanggal terakhir; jika kosong, seed penuh dari awal |
+| `python seed_data.py --reset` | **Reset penuh** — truncate semua tabel lalu seed ulang dari awal |
+| `python seed_data.py --purge` | **Purge rentang** — hapus transaksi/settlement untuk `DATE_START`–`DATE_END`, simpan merchant/kartu, lalu seed ulang transaksi |
+| `python seed_data.py --report` | **Laporan saja** — skip seeding, query data yang ada, cetak kartu konsol dan simpan JPEG |
+| `python seed_data.py --append` | **Append** — cari tanggal transaksi terakhir di DB, seed dari hari berikutnya hingga `DATE_END`, tidak menyentuh baris yang ada |
+| `python seed_data.py --prune-closed` | **Prune merchant tutup** — baca `closed_from` dari `poi_edc.csv`, hapus transaksi/settlement pada atau setelah tanggal penutupan |
+| `python seed_data.py --batch-seed` | **Batch seed** — proses semua file `list_*.xlsx` di folder `input/`, insert merchant baru, generate transaksi, hasilkan `batch_activity_report.xlsx` |
+| `python seed_data.py --add-merchants` | **Tambah merchant** — insert merchant dari `poi_edc.csv` yang belum ada di DB, lalu generate transaksi |
 
 ---
 
-## Configuration
+## Konfigurasi
 
-All settings are at the top of `seed_data.py`. Override the DB connection via environment variables:
+Semua pengaturan ada di bagian atas `seed_data.py`. Override koneksi DB via environment variable:
 
-| Variable | Default | Description |
+| Variable | Default | Keterangan |
 |---|---|---|
-| `PG_HOST` | `localhost` | PostgreSQL host |
-| `PG_PORT` | `5432` | PostgreSQL port |
-| `PG_DB` | `edtransmap` | Database name |
+| `PG_HOST` | `localhost` | Host PostgreSQL |
+| `PG_PORT` | `5432` | Port PostgreSQL |
+| `PG_DB` | `edtransmap` | Nama database |
 | `PG_USER` | `postgres` | Username |
 | `PG_PASSWORD` | `Manualbrew1` | Password |
 
-**Date range** — change these two lines in `seed_data.py`:
+**Rentang tanggal** — ubah dua baris ini di `seed_data.py`:
 
 ```python
-DATE_START = date(2026, 3, 12)
-DATE_END   = date(2026, 6, 12)   # inclusive
+DATE_START = date(2025, 1, 1)
+DATE_END   = date(2026, 6, 23)   # inklusif
 ```
-
-The merchant registration date embedded in codes (e.g. `MCH-5814-20250301-00001`) is automatically set to a random date 3–18 months before `DATE_START`.
 
 ---
 
-## Database Schema
+## Format File Input
 
-### Tables
+### `poi_edc.csv` — Data POI Utama
 
-| Table | PK | Purpose |
+File CSV utama yang memuat semua merchant aktif. Dibaca pada setiap mode seeding.
+
+| Kolom | Wajib | Keterangan |
 |---|---|---|
-| `admin_areas` | `SERIAL` | Self-referential hierarchy: Province → City/Regency → District → Village |
-| `acquirers` | `SMALLSERIAL` | Banks operating EDC acquiring (BCA, Mandiri, BNI) |
-| `merchants` | `UUID` | Merchant profiles with geo-coordinates and admin area FK |
-| `terminals` | `UUID` | Physical EDC machines, one per merchant |
-| `cards` | `BIGSERIAL` | Synthetic masked card references |
-| `qris_issuers` | `SMALLSERIAL` | QRIS sources: GoPay, ShopeePay, Dana, OVO, LinkAja, BCA, Mandiri, BNI, BRI |
-| `transactions` | `BIGSERIAL` | All payment transactions with CHECK constraint enforcing EDC_CARD/QRIS exclusivity |
-| `settlement` | `SERIAL` | Daily batch settlement summary per merchant |
-| `transaction_log` | `BIGSERIAL` | ISO 8583 raw message audit trail |
+| `name1` | ✓ | Nama merchant |
+| `displaylatitude` | ✓ | Latitude tampilan |
+| `displaylongitude` | ✓ | Longitude tampilan |
+| `routinglatitude` | | Latitude routing (opsional, fallback ke display) |
+| `routinglongitude` | | Longitude routing |
+| `primarycategorynm` | ✓ | Kategori POI (misal: `Restaurant`, `Coffee Shop`) |
+| `hno` | | Nomor rumah/gedung |
+| `streetname` | | Nama jalan |
+| `postalcode` | | Kode pos |
+| `admin2` | ✓ | Provinsi |
+| `admin3` | ✓ | Kota/Kabupaten |
+| `admin4` | | Kecamatan |
+| `admin5` | | Kelurahan |
+| `PHONE` | | Nomor telepon |
+| `MOBILE` | | Nomor HP |
+| `status` | ✓ | `ACTIVE` atau `INACTIVE` — hanya baris `ACTIVE` yang di-seed |
+| `closed_from` | | Tanggal penutupan format `YYYY-MM-DD` — transaksi setelah tanggal ini tidak di-generate |
+| `mondayopening` | | Jam buka Senin (desimal hari, misal `0.375` = 09:00) |
+| `mondayclosing` | | Jam tutup Senin |
+| *(selasa–minggu)* | | Kolom jam serupa untuk hari lainnya |
 
-### Views
+> **Format jam (day-fraction):** Nilai desimal antara 0–1 mewakili proporsi hari. Contoh: `0.375` = 9 jam × (1/24) = 09:00, `0.875` = 21:00.
 
-| View | Description |
+---
+
+### `list_new_edc.xlsx` — Merchant Baru
+
+Sheet aktif: baris pertama sebagai header. Merchant yang belum ada di DB akan di-insert dan di-seed transaksinya.
+
+| Kolom | Wajib | Keterangan |
+|---|---|---|
+| `supplier_poiid` | ✓ | ID unik merchant (tampil di kolom ID laporan batch) |
+| `poi_nm` | ✓ | Nama merchant |
+| `display_point_latitude` | ✓ | Latitude |
+| `display_point_longitude` | ✓ | Longitude |
+| `routing_latitude` | | Latitude routing |
+| `routing_longitude` | | Longitude routing |
+| `category` | ✓ | Kategori POI |
+| `operating hours` | | Jam operasional teks bebas (misal: `Monday-Sunday, 08:00-22:00` atau `24/7`) |
+| `house_number` | | Nomor rumah |
+| `street_name` | | Nama jalan |
+| `postal_code` | | Kode pos |
+| `Admin 2` | ✓ | Provinsi |
+| `Admin 3` | ✓ | Kota/Kabupaten |
+| `Admin 4` | | Kecamatan |
+| `Admin 5` | | Kelurahan |
+| `phone number` | | Telepon |
+| `Mobile` | | HP |
+
+> **Format jam teks:** `Monday-Sunday, 08:00-22:00` \| `Mon-Fri, 09:00-17:00; Sat, 10:00-15:00` \| `24/7`
+
+---
+
+### `list_update_edc.xlsx` — Merchant Diperbarui
+
+Merchant yang sudah ada di DB namun data POI-nya perlu diperbarui (koordinat, jam, kategori, dsb). Format kolom sama dengan `list_new_edc.xlsx` dengan tambahan kolom verifikasi.
+
+| Kolom | Wajib | Keterangan |
+|---|---|---|
+| `ID` | ✓ | ID unik merchant (tampil di kolom ID laporan batch) |
+| `POI name` | ✓ | Nama merchant |
+| `displaylatitude` | ✓ | Latitude |
+| `displaylongitude` | ✓ | Longitude |
+| `routing_latitude` | | Latitude routing |
+| `routing_longitude` | | Longitude routing |
+| `primarycategorynm` | ✓ | Kategori POI |
+| `operating_hours` | | Jam operasional teks bebas |
+| `house_number` | | Nomor rumah |
+| `streetname` | | Nama jalan |
+| `postalcode` | | Kode pos |
+| `Admin 2` | ✓ | Provinsi |
+| `Admin 3` | ✓ | Kota/Kabupaten |
+| `Admin 4` | | Kecamatan |
+| `Admin 5` | | Kelurahan |
+| `PHONE` | | Telepon |
+| `MOBILE` | | HP |
+
+---
+
+### `list_delete_edc.xlsx` — Merchant Tutup/Dihapus
+
+Merchant yang sudah tidak aktif. Transaksi setelah `closed_from` akan di-prune; merchant tetap ada di DB dan muncul di sheet DELETE laporan batch.
+
+| Kolom | Wajib | Keterangan |
+|---|---|---|
+| `supplier_poiid` | ✓ | ID unik merchant |
+| `poi_nm` | ✓ | Nama merchant |
+| `displaylatitude` | ✓ | Latitude |
+| `displaylongitude` | ✓ | Longitude |
+| `routinglatitude` | | Latitude routing |
+| `routinglongitude` | | Longitude routing |
+| `primarycategorynm` | ✓ | Kategori POI |
+| `hno` | | Nomor rumah |
+| `streetname` | | Nama jalan |
+| `postalcode` | | Kode pos |
+| `admin2` | ✓ | Provinsi |
+| `admin3` | ✓ | Kota/Kabupaten |
+| `admin4` | | Kecamatan |
+| `admin5` | | Kelurahan |
+| `PHONE` | | Telepon |
+| `MOBILE` | | HP |
+| `mondayopening` / `mondayclosing` | | Jam operasional format day-fraction (sama seperti `poi_edc.csv`) |
+| *(selasa–minggu)* | | Kolom jam serupa |
+| `closed_from` | ✓ | Tanggal penutupan format `YYYY-MM-DD` — transaksi pada/setelah tanggal ini dihapus |
+| `last update` | | Teks referensi tanggal penutupan (misal: `review google 2025 Q 1`) |
+
+> Kolom `closed_from` perlu ditambahkan manual ke xlsx dengan tanggal penutupan dalam format `YYYY-MM-DD`. Jika merchant memiliki transaksi sebelum `closed_from` dalam rentang DATE_START–DATE_END, transaksi tersebut tetap dipertahankan.
+
+---
+
+### `list_batch.xlsx` — Data Batch Campuran (ATM + Merchant Baru)
+
+File ini memuat data campuran. Merchant dengan `category = ATM` diperlakukan sebagai **realtime** (hanya generate kartu sinyal, tidak masuk DB). Merchant lainnya diperlakukan sebagai merchant baru seperti `list_new_edc.xlsx`.
+
+| Kolom | Wajib | Keterangan |
+|---|---|---|
+| `id` | ✓ | ID unik POI |
+| `poi_nm` | ✓ | Nama POI |
+| `category` | ✓ | Kategori — nilai `ATM` → realtime, selainnya → merchant baru |
+| `display_point_latitude` | ✓ | Latitude |
+| `display_point_longitude` | ✓ | Longitude |
+| `operating hours` | | Jam operasional teks bebas |
+| `house_number` | | Nomor rumah |
+| `street_name` | | Nama jalan (dipakai di nama kartu realtime, prefix "Jalan" otomatis dihapus) |
+| `postal_code` | | Kode pos |
+| `Admin 2` | ✓ | Provinsi |
+| `Admin 3` | ✓ | Kota/Kabupaten |
+| `Admin 4` | | Kecamatan |
+| `Admin 5` | | Kelurahan |
+| `phone number` | | Telepon |
+| `Mobile` | | HP |
+| `last update signal date time` | | Datetime sinyal terakhir (jika kosong, diganti dengan waktu acak hari ini dalam jam operasional) |
+| `last_update` | | Tanggal update terakhir format `DD/MM/YYYY` (fallback jika kolom signal kosong) |
+
+> **ATM / Realtime:** Nama pada kartu JPEG ditulis **HURUF KAPITAL** + nama jalan tanpa prefix "Jalan" (contoh: `ATM BCA Pantai Indah Kapuk`). Sinyal terakhir di-generate acak dalam jam operasional hari ini. Dianggap **AKTIF** jika sinyal dalam 90 hari terakhir.
+
+---
+
+### `list_realtime.csv` — Tracking Sinyal Realtime *(Di-generate Otomatis)*
+
+File ini **tidak perlu dibuat manual**. Di-generate otomatis saat `--batch-seed` memproses `list_batch.xlsx`. Digunakan kembali oleh `--report` untuk regenerasi kartu tanpa membaca xlsx lagi.
+
+| Kolom | Keterangan |
 |---|---|
-| `vw_merchant_admin_hierarchy` | Full province → city → district → village path per merchant |
-| `vw_district_transaction_summary` | Transaction volume grouped by administrative district |
-| `vw_daily_merchant_summary` | Daily transaction summary per merchant |
-| `vw_terminal_approval_rate` | Approval rate per terminal |
-| `vw_channel_split` | QRIS vs card channel split per merchant |
-| `vw_unsettled_transactions` | Approved transactions not yet settled |
-| `vw_settlement_reconciliation` | Settlement vs computed totals discrepancy check |
+| `id` | ID POI |
+| `poi_nm` | Nama POI (asli, sebelum uppercase) |
+| `last_signal` | Datetime sinyal terakhir format `YYYY-MM-DD HH:MM:SS` |
+| `category` | Kategori (biasanya `ATM`) |
+| `street` | Nama jalan lengkap (prefix "Jalan" dihapus saat rendering kartu) |
 
-### Code Formats
+---
 
-| Field | Format | Example |
+## Output Laporan
+
+Setelah seeding atau dengan `--report`, script menghasilkan:
+
+1. **Kartu konsol** — dicetak ke terminal per merchant
+2. **JPEG per merchant** — disimpan ke `reports/YYYYMMDD/`
+3. **`merchant_activity_report.xlsx`** — seluruh merchant dalam satu file Excel
+4. **`batch_activity_report.xlsx`** — hanya merchant dari file batch, terdiri dari 4 sheet:
+
+| Sheet | Isi |
+|---|---|
+| `NEW` | Merchant dari `list_new_edc.xlsx` dan non-ATM dari `list_batch.xlsx` |
+| `UPDATE` | Merchant dari `list_update_edc.xlsx` |
+| `DELETE` | Merchant dari `list_delete_edc.xlsx` |
+| `REALTIME` | ATM dari `list_batch.xlsx` (kartu sinyal, bukan kartu transaksi) |
+
+Setiap baris laporan batch berisi: nomor urut, ID sumber, nama merchant, waktu sinyal terakhir, dan foto kartu JPEG.
+
+---
+
+## Skema Database
+
+### Tabel
+
+| Tabel | PK | Fungsi |
+|---|---|---|
+| `admin_areas` | `SERIAL` | Hierarki wilayah: Provinsi → Kota → Kecamatan → Kelurahan |
+| `acquirers` | `SMALLSERIAL` | Bank acquirer EDC (BCA, Mandiri, BNI) |
+| `merchants` | `UUID` | Profil merchant dengan koordinat geo dan FK area admin |
+| `terminals` | `UUID` | Mesin EDC fisik, satu per merchant |
+| `cards` | `BIGSERIAL` | Referensi kartu sintetis yang di-mask |
+| `qris_issuers` | `SMALLSERIAL` | Sumber QRIS: GoPay, ShopeePay, Dana, OVO, LinkAja, BCA, Mandiri, BNI, BRI |
+| `transactions` | `BIGSERIAL` | Semua transaksi pembayaran |
+| `settlement` | `SERIAL` | Ringkasan settlement harian per merchant |
+| `transaction_log` | `BIGSERIAL` | Audit trail pesan ISO 8583 mentah |
+
+### Format Kode
+
+| Field | Format | Contoh |
 |---|---|---|
 | `merchant_code` | `MCH-{MCC}-{YYYYMMDD}-{SEQ:05d}` | `MCH-5814-20250301-00001` |
 | `terminal_code` | `TID-{MCC}-{YYYYMMDD}-{SEQ:05d}` | `TID-5814-20250301-00001` |
-| `serial_number` | `SN-{YYYY}-{SEQ:04d}` | `SN-2026-0001` |
 | `trace_number` | `RRN{YYYYMMDD}{SEQ:06d}` | `RRN20260601000001` |
-| `approval_code` | 6-char alphanumeric | `A1B2C3` |
 
 ---
 
-## Data Characteristics
+## Karakteristik Data Transaksi
 
-### Merchants (29 POIs)
-
-Categories seeded from `poi_edc.csv`, mapped to ISO 18245 MCC codes:
-
-| Category | MCC |
-|---|---|
-| Restaurant / Casual Dining | 5812 |
-| Coffee Shop | 5814 |
-| Food-Beverage Specialty Store | 5499 |
-| Clothing and Accessories | 5651 |
-| Women's Apparel | 5621 |
-| Florist | 5992 |
-| Hair and Beauty | 7230 |
-| Wellness Center and Services | 7298 |
-| Therapist | 8049 |
-| Dentist-Dental Office | 8021 |
-| School | 8220 |
-| Convention-Exhibition Center | 7990 |
-
-### Transaction Behaviour
-
-- **QRIS vs Card** — F&B and everyday services lean QRIS (55–70%); luxury retail leans card (25–28%). Bank QRIS collectively exceeds fintech. GoPay leads fintech issuers.
-- **QRIS declines** — limited to connection timeout (`91`) and do-not-honor (`05`) only. Insufficient funds (`51`), expired card (`54`), and limit codes never fire on QRIS because the wallet balance is shown to the customer before confirmation.
-- **QRIS refunds** — not generated as transaction records. When a QRIS payment fails, the network reverses it automatically; no `REFUND` row is written to the EDC system.
-- **Transaction mix** — ~85% SALE, ~3% REFUND (card only), ~2% VOID companions for approved SALEs.
-- **Approval rate** — ~88% for EDC card, ~97% for QRIS.
-- **Operating hours** — sourced from actual Google Maps data in the CSV. Category-level defaults applied when CSV has no hours.
-- **Holiday closures** — Indonesian national holidays (2025–2026) cause Clothing, Florist, School, Dentist, and Convention categories to generate zero transactions that day. F&B and wellness remain open.
-
-### Cards (300 synthetic)
-
-Brands: VISA, MASTERCARD, JCB, AMEX, GPN  
-Types: DEBIT (50%), CREDIT (40%), PREPAID (10%)  
-Issuing banks: BCA, Mandiri, BNI, BRI, Permata, CIMB Niaga, BTN, BSI
+- **QRIS vs Kartu** — F&B dan layanan sehari-hari cenderung QRIS (55–70%); retail premium cenderung kartu (25–28%)
+- **Mix transaksi** — ~85% SALE, ~3% REFUND (kartu saja), ~2% VOID
+- **Approval rate** — ~88% untuk EDC kartu, ~97% untuk QRIS
+- **Jam operasional** — diambil dari data nyata di CSV/xlsx. Default per kategori diterapkan jika tidak ada data jam
+- **Hari libur** — hari libur nasional Indonesia (2025–2026) menyebabkan kategori tertentu (Pakaian, Bunga, Sekolah, Dokter Gigi) tidak generate transaksi. F&B dan kesehatan tetap buka
 
 ---
 
-## Seeder Output
+## Query Analitik
 
-Running `python seed_data.py` produces a step-by-step progress log, a row-count verification, and a merchant activity health report. Each merchant gets a console card and a JPEG saved to `reports/YYYYMMDD/`.
-
-```
-============================================================
-  EDC POC Seeder
-  Mode       : FULL RESET
-  Date range : 2026-03-12 — 2026-06-12
-  CSV        : poi_edc.csv
-  Database   : edtransmap@localhost:5432
-============================================================
-[1/7] Resetting database...
-[2/7] Loading reference data...
-[3/7] Loading CSV...          29 active POIs loaded.
-[4/7] Inserting admin areas...
-[5/7] Inserting merchants + terminals...
-[6/7] Inserting cards...      300 cards inserted.
-[7/7] Generating transactions, settlement, and audit logs...
-
-Row count verification:
-      admin_areas                   12
-      merchants                     29
-      terminals                     29
-      cards                        300
-      qris_issuers                   9
-      transactions              87,241
-      settlement                   580
-      transaction_log          171,604
-
-[8/8] Merchant activity report...
-
-══════════════════════════════════════════════════════════════
-  MERCHANT ACTIVITY REPORT
-  Loaded at : 2026-06-12T14:30:00+0700  (WIB UTC+7)
-  Data range: 2026-03-12 – 2026-06-12
-  Output    : reports/20260612
-══════════════════════════════════════════════════════════════
-
-──────────────────────────────────────────────────────────────
-Kopi Konnichiwa
-STATUS        : ACTIVE     (confidence 0.941)
-last_txn      : 2026-06-12T18:44:10+0700  (0.3h ago)
-txn 24h/7d/30d: 87 / 612 / 2451
-channel split : QRIS 1714  |  EDC 737
-active days   : 30/30  (ratio 1.000, max gap 1d)
-reasons       :
-  - last txn 0h ago (<= 72h)
-  - 30/30 active days, max gap 1d
-  - 2451 approved txn / 30d (1714 QRIS, 737 EDC)
-
-══════════════════════════════════════════════════════════════
-  JPEG cards saved to: reports/20260612
-══════════════════════════════════════════════════════════════
-```
-
-### Activity Card — Confidence Score
-
-Each merchant gets a `STATUS` derived from a weighted score (0–1):
-
-| Factor | Weight | Signal |
-|---|---|---|
-| Recency | 40% | Hours since last approved transaction |
-| Activity ratio | 35% | Distinct active days / 30-day window |
-| Volume | 25% | Log-scaled approved SALE count (30d) |
-
-| Status | Condition |
-|---|---|
-| `ACTIVE` | confidence ≥ 0.75 and last transaction ≤ 72h ago |
-| `INACTIVE` | confidence ≥ 0.40 or last transaction ≤ 7 days ago |
-| `SUSPENDED` | below both thresholds |
-
----
-
-## Analytical Queries
-
-`queries.sql` contains 15 ready-to-run queries. Set the date window in psql first:
+`queries.sql` berisi 15 query siap pakai. Set rentang tanggal di psql terlebih dahulu:
 
 ```sql
-\set date_from '2026-03-12'
-\set date_to   '2026-06-12'
+\set date_from '2025-01-01'
+\set date_to   '2026-06-23'
 ```
 
 | # | Query |
 |---|---|
-| 1 | Raw transactions (date range, newest first) |
-| 2 | Overall totals — gross sales, refunds, net revenue, approval rate |
-| 3 | Daily transaction trend |
-| 4 | Payment channel split (QRIS vs EDC_CARD) |
-| 5 | QRIS issuer breakdown with share % |
-| 6 | Card brand breakdown |
-| 7 | Top merchants by transaction volume |
-| 8 | Category / MCC breakdown with avg ticket and QRIS share |
-| 9 | Decline analysis by ISO 8583 response code |
-| 10 | Terminal approval rates |
-| 11 | Geographic summary (Province → City → District) |
-| 12 | Settlement status by date |
-| 13 | Unsettled approved transactions |
-| 14 | Holiday effect — avg daily sales on holidays vs normal days |
-| 15 | Hourly transaction heatmap |
-
-All queries mask internal IDs. Codes are partially masked using `LEFT / REPEAT / RIGHT`:
-
-```
-MCH-5814-20250301-00001  →  MCH******************01
-TID-5814-20250301-00001  →  TID******************01
-```
+| 1 | Transaksi mentah (rentang tanggal, terbaru lebih dulu) |
+| 2 | Total keseluruhan — gross sales, refund, net revenue, approval rate |
+| 3 | Tren transaksi harian |
+| 4 | Split channel pembayaran (QRIS vs EDC_CARD) |
+| 5 | Rincian issuer QRIS dengan persentase |
+| 6 | Rincian merek kartu |
+| 7 | Top merchant berdasarkan volume transaksi |
+| 8 | Rincian kategori/MCC dengan rata-rata tiket dan share QRIS |
+| 9 | Analisis penolakan berdasarkan kode respons ISO 8583 |
+| 10 | Approval rate per terminal |
+| 11 | Ringkasan geografis (Provinsi → Kota → Kecamatan) |
+| 12 | Status settlement per tanggal |
+| 13 | Transaksi approved yang belum di-settle |
+| 14 | Efek hari libur — rata-rata penjualan harian libur vs hari biasa |
+| 15 | Heatmap transaksi per jam |

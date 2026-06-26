@@ -999,7 +999,8 @@ def read_batch_xlsx(xlsx_path: Path, batch_type: str) -> list[dict]:
             _sig_m, _sig_sec = divmod(_sig_rem, 60)
             last_signal_str = datetime(_today.year, _today.month, _today.day,
                                        _sig_h, _sig_m, _sig_sec).strftime("%Y-%m-%d %H:%M:%S")
-            is_realtime = (category.strip().lower() == "atm")
+            # update if need to add more
+            is_realtime = (category.strip().lower() == "atm") 
             row_batch_type = "xlsx-realtime" if is_realtime else "xlsx-new"
             closed_from_str = ""
         else:
@@ -2543,7 +2544,7 @@ def generate_merchant_status_report(conn, merchants_info: list[dict]) -> None:
 _BATCH_NEW_XLSX  = INPUT_DIR / "list_new_edc.xlsx"
 _BATCH_UPD_XLSX  = INPUT_DIR / "list_update_edc.xlsx"
 _BATCH_DEL_XLSX  = INPUT_DIR / "list_delete_edc.xlsx"
-_BATCH_5POI_XLSX = INPUT_DIR / "5_poi_dims.xlsx"
+_BATCH_DATA_XLSX = INPUT_DIR / "list_batch.xlsx"
 _REALTIME_CSV    = INPUT_DIR / "list_realtime.csv"
 
 
@@ -2565,8 +2566,8 @@ def _load_xlsx_supplement(csv_rows: list[dict]) -> int:
         rows = read_batch_xlsx(_BATCH_DEL_XLSX, "delete")
         csv_rows.extend(rows)
         count += len(rows)
-    if _BATCH_5POI_XLSX.exists():
-        rows_5poi = read_batch_xlsx(_BATCH_5POI_XLSX, "5poi")
+    if _BATCH_DATA_XLSX.exists():
+        rows_5poi = read_batch_xlsx(_BATCH_DATA_XLSX, "5poi")
         non_realtime = [r for r in rows_5poi if r.get("batch_type") != "xlsx-realtime"]
         csv_rows.extend(non_realtime)
         count += len(non_realtime)
@@ -2727,11 +2728,11 @@ def main() -> None:
             batch_rows.extend(del_rows)
         else:
             print(f"      list_delete_edc.xlsx: not found — skipped")
-        if _BATCH_5POI_XLSX.exists():
-            all_5poi    = read_batch_xlsx(_BATCH_5POI_XLSX, "5poi")
+        if _BATCH_DATA_XLSX.exists():
+            all_5poi    = read_batch_xlsx(_BATCH_DATA_XLSX, "5poi")
             rt_rows     = [r for r in all_5poi if r.get("batch_type") == "xlsx-realtime"]
             new_5poi    = [r for r in all_5poi if r.get("batch_type") != "xlsx-realtime"]
-            print(f"      5_poi_dims.xlsx     : {len(new_5poi)} new POI, {len(rt_rows)} realtime")
+            print(f"      list_batch.xlsx     : {len(new_5poi)} new POI, {len(rt_rows)} realtime")
             batch_rows.extend(new_5poi)
             if rt_rows:
                 import csv as _csv_mod
@@ -2748,7 +2749,7 @@ def main() -> None:
                         })
                 print(f"      list_realtime.csv   : {len(rt_rows)} rows written")
         else:
-            print(f"      5_poi_dims.xlsx     : not found — skipped")
+            print(f"      list_batch.xlsx     : not found — skipped")
 
         if not batch_rows:
             print("      No batch rows loaded — nothing to do.")
