@@ -1177,6 +1177,109 @@ def _read_unified_csv(path: Path) -> list[dict]:
     return result
 
 
+_DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+
+def _schedule_to_text(sched: dict) -> str:
+    """Convert {weekday: (open_time, close_time)} back to operating-hours text."""
+    if not sched:
+        return ""
+    groups: dict = {}
+    for wd in range(7):
+        slot = sched.get(wd)
+        key  = (slot[0].strftime("%H:%M"), slot[1].strftime("%H:%M")) if (slot and slot[0] and slot[1]) else None
+        groups.setdefault(key, []).append(wd)
+
+    open_groups = {k: sorted(v) for k, v in groups.items() if k is not None}
+    if not open_groups:
+        return ""
+
+    parts = []
+    for (o, c), days in sorted(open_groups.items(), key=lambda x: x[1][0]):
+        if days == list(range(7)):
+            label = "Monday-Sunday"
+        elif days == list(range(5)):
+            label = "Monday-Friday"
+        elif days == [5, 6]:
+            label = "Saturday-Sunday"
+        elif days == list(range(days[0], days[-1] + 1)):
+            label = f"{_DAY_NAMES[days[0]]}-{_DAY_NAMES[days[-1]]}"
+        else:
+            label = "/".join(_DAY_NAMES[d] for d in days)
+        parts.append(f"{label}, {o}-{c}")
+    return "; ".join(parts)
+
+
+def _merge_inputs_to_unified_csv(output_path: Path) -> int:
+    """Read all input xlsx files and write a unified list_edc.csv. Returns rows written."""
+    import csv as _csv_mod
+
+    BT_MAP = {
+        "xlsx-new":      "new",
+        "xlsx-update":   "update",
+        "xlsx-delete":   "delete",
+        "xlsx-realtime": "realtime",
+    }
+    FIELDNAMES = [
+        "report_status", "id", "name", "latitude", "longitude",
+        "routing_lat", "routing_lon", "category", "operating_hours",
+        "phone", "mobile", "house_number", "street_name", "postal_code",
+        "admin2", "admin3", "admin4", "admin5", "closed_from",
+    ]
+
+    all_rows: list[dict] = []
+    for path, btype in [
+        (_BATCH_NEW_XLSX,  "new"),
+        (_BATCH_UPD_XLSX,  "update"),
+        (_BATCH_DEL_XLSX,  "delete"),
+        (_BATCH_DATA_XLSX, "5poi"),
+    ]:
+        if path.exists():
+            rows = read_batch_xlsx(path, btype)
+            all_rows.extend(rows)
+            print(f"      {path.name:<26}: {len(rows)} rows")
+        else:
+            print(f"      {path.name:<26}: not found — skipped")
+
+    if not all_rows:
+        print("      No rows to merge.")
+        return 0
+
+    written = 0
+    with open(output_path, "w", newline="", encoding="utf-8-sig") as f:
+        w = _csv_mod.DictWriter(f, fieldnames=FIELDNAMES)
+        w.writeheader()
+        for r in all_rows:
+            rs = BT_MAP.get(r.get("batch_type", ""))
+            if not rs:
+                continue
+            sched = r.get("_schedule_override")
+            w.writerow({
+                "report_status":   rs,
+                "id":              r.get("_xlsx_id", ""),
+                "name":            r.get("name1", ""),
+                "latitude":        r.get("displaylatitude", ""),
+                "longitude":       r.get("displaylongitude", ""),
+                "routing_lat":     r.get("routinglatitude", ""),
+                "routing_lon":     r.get("routinglongitude", ""),
+                "category":        r.get("primarycategorynm", ""),
+                "operating_hours": _schedule_to_text(sched) if sched else "",
+                "phone":           r.get("PHONE", ""),
+                "mobile":          r.get("MOBILE", ""),
+                "house_number":    r.get("hno", ""),
+                "street_name":     r.get("streetname", ""),
+                "postal_code":     r.get("postalcode", ""),
+                "admin2":          r.get("admin2", ""),
+                "admin3":          r.get("admin3", ""),
+                "admin4":          r.get("admin4", ""),
+                "admin5":          r.get("admin5", ""),
+                "closed_from":     r.get("closed_from", ""),
+            })
+            written += 1
+
+    return written
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # INSERT ADMIN AREAS  (Province → City/Regency → District → Village)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -2889,6 +2992,7 @@ def main() -> None:
     add_merchants_mode   = "--add-merchants"   in sys.argv
     batch_seed_mode      = "--batch-seed"      in sys.argv
     upload_mode          = "--upload"          in sys.argv
+    merge_csv_mode       = "--merge-csv"       in sys.argv
 
     conn = get_connection()
 
@@ -2910,6 +3014,13 @@ def main() -> None:
         conn.close()
         return
 
+    if merge_csv_mode:
+        print(f"[merge-csv] Reading input xlsx files → {_BATCH_UNIFIED_CSV} ...")
+        n = _merge_inputs_to_unified_csv(_BATCH_UNIFIED_CSV)
+        print(f"[merge-csv] Done — {n} rows written to {_BATCH_UNIFIED_CSV}")
+        conn.close()
+        return
+
     # Auto-detect: if no explicit mode and DB already has data → append instead of wipe
     if not any([reset_mode, purge_mode, append_mode, report_mode, report_selected_mode,
                 prune_closed_mode, add_merchants_mode, batch_seed_mode]):
@@ -2918,7 +3029,9 @@ def main() -> None:
             if cur.fetchone()[0] > 0:
                 append_mode = True
 
-    if report_selected_mode:
+    if merge_csv_mode:
+        mode_label = "MERGE INPUTS → list_edc.csv"
+    elif report_selected_mode:
         mode_label = "REPORT SELECTED (input files only)"
     elif report_mode:
         mode_label = "REPORT ONLY"
