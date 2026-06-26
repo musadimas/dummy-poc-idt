@@ -1744,7 +1744,8 @@ def load_merchants_from_db(conn, csv_rows: list[dict]) -> list[dict]:
         cf_raw = row.get("closed_from", "")
         cf_str = cf_raw.strip() if isinstance(cf_raw, str) else ""
         bt      = row.get("batch_type", "").strip()
-        xlsx_id = row.get("_xlsx_id", "")
+        xlsx_id = (row.get("_xlsx_id", "") or row.get("supplier_poiid", "")
+                   or row.get("ID", "") or row.get("id", ""))
         csv_schedule[name] = {
             "category":    category,
             "schedule":    schedule,
@@ -2009,6 +2010,7 @@ def _save_card_jpeg(
     now_wib,
     output_dir: Path,
     seq: int,
+    xlsx_id: str = "",
 ) -> "Path | None":
     """Render a styled JPEG activity card for one merchant. Returns the saved path."""
     try:
@@ -2069,9 +2071,13 @@ def _save_card_jpeg(
     footer = f"Generated {now_wib.strftime('%Y-%m-%dT%H:%M:%S%z')}"
     draw.text((_PAD, y), footer, font=font_sm, fill=_C_BORDER)
 
-    # save
-    safe_name = "".join(c if c.isalnum() or c in " -_" else "_" for c in merchant_name)
-    fname = output_dir / f"{seq:02d}_{safe_name[:40].strip()}.jpg"
+    # save — use xlsx_id for filename when available
+    if xlsx_id:
+        safe_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in xlsx_id)
+        fname = output_dir / f"{safe_id[:60]}.jpg"
+    else:
+        safe_name = "".join(c if c.isalnum() or c in " -_" else "_" for c in merchant_name)
+        fname = output_dir / f"{seq:02d}_{safe_name[:40].strip()}.jpg"
     img.save(fname, "JPEG", quality=92)
     return fname
 
@@ -2088,6 +2094,7 @@ def _save_realtime_card_jpeg(
     now_wib,
     output_dir: Path,
     seq: int,
+    xlsx_id: str = "",
 ) -> "Path | None":
     """Render a simplified signal-only card for realtime (ATM/bank) POIs."""
     try:
@@ -2134,8 +2141,12 @@ def _save_realtime_card_jpeg(
     draw.text((_PAD, y), f"Generated {now_wib.strftime('%Y-%m-%dT%H:%M:%S%z')}",
               font=font_sm, fill=_C_BORDER)
 
-    safe_name = "".join(c if c.isalnum() or c in " -_" else "_" for c in name)
-    fname = output_dir / f"{seq:02d}_{safe_name[:40].strip()}_rt.jpg"
+    if xlsx_id:
+        safe_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in xlsx_id)
+        fname = output_dir / f"{safe_id[:60]}_rt.jpg"
+    else:
+        safe_name = "".join(c if c.isalnum() or c in " -_" else "_" for c in name)
+        fname = output_dir / f"{seq:02d}_{safe_name[:40].strip()}_rt.jpg"
     img.save(fname, "JPEG", quality=92)
     return fname
 
@@ -2258,7 +2269,75 @@ def _save_batch_excel_report(
 
     xlsx_path = output_dir / "batch_activity_report.xlsx"
     wb.save(xlsx_path)
+
+    # Write companion meta JSON so --upload can build the Drive-linked version
+    import json as _json
+    _meta = {}
+    for sheet_name, recs in (
+        ("NEW", new_records), ("UPDATE", update_records),
+        ("DELETE", delete_records), ("REALTIME", realtime_records),
+    ):
+        _meta[sheet_name] = [
+            {"seq": s, "name": n, "last_signal": ls,
+             "jpeg_path": str(jp) if jp else "", "xlsx_id": xid}
+            for s, n, ls, jp, xid in recs
+        ]
+    (output_dir / "batch_activity_report_meta.json").write_text(
+        _json.dumps(_meta, indent=2, ensure_ascii=False)
+    )
+
     return xlsx_path
+
+
+def _build_linked_batch_excel(meta: dict, drive_links: dict, output_dir: Path) -> Path:
+    """
+    Build batch_activity_report.xlsx with Drive hyperlinks in the Proof column
+    instead of embedded images. Used for the version uploaded to Google Drive.
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment, PatternFill
+
+    wb = Workbook()
+    HDR_FILL  = PatternFill("solid", fgColor="1E2A3A")
+    HDR_FONT  = Font(bold=True, color="FFFFFF", size=11)
+    HDR_ALIGN = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    LINK_FONT = Font(color="0563C1", underline="single")
+    headers    = ["#", "ID", "POI Name", "Last Signal Update", "Proof (Link)"]
+    col_widths = [4, 36, 36, 28, 36]
+
+    def _write_linked(ws, records, title):
+        ws.title = title
+        ws.row_dimensions[1].height = 28
+        for ci, (h, w) in enumerate(zip(headers, col_widths), 1):
+            cell = ws.cell(row=1, column=ci, value=h)
+            cell.font = HDR_FONT
+            cell.fill = HDR_FILL
+            cell.alignment = HDR_ALIGN
+            ws.column_dimensions[cell.column_letter].width = w
+        CTR = Alignment(horizontal="center", vertical="center")
+        MID = Alignment(vertical="center", wrap_text=True)
+        for ri, rec in enumerate(records, start=2):
+            ws.row_dimensions[ri].height = 18
+            ws.cell(row=ri, column=1, value=rec["seq"]).alignment     = CTR
+            ws.cell(row=ri, column=2, value=rec["xlsx_id"]).alignment = MID
+            ws.cell(row=ri, column=3, value=rec["name"]).alignment    = MID
+            ws.cell(row=ri, column=4, value=rec["last_signal"]).alignment = CTR
+            url = drive_links.get(rec.get("jpeg_path", ""), "")
+            if url:
+                c = ws.cell(row=ri, column=5, value="view")
+                c.hyperlink = url
+                c.font = LINK_FONT
+                c.alignment = CTR
+            else:
+                ws.cell(row=ri, column=5, value="—").alignment = CTR
+
+    _write_linked(wb.active, meta.get("NEW", []), "NEW")
+    for sheet_name in ("UPDATE", "DELETE", "REALTIME"):
+        _write_linked(wb.create_sheet(), meta.get(sheet_name, []), sheet_name)
+
+    out = output_dir / "batch_activity_report_drive.xlsx"
+    wb.save(str(out))
+    return out
 
 
 def _format_ago(hours_ago: float) -> str:
@@ -2313,6 +2392,7 @@ def _generate_realtime_records(output_dir: Path, seq_start: int, now_wib) -> "tu
                 last_signal_fmt=sig_fmt, ago_str=ago_str,
                 reasons=reasons, now_wib=now_wib,
                 output_dir=output_dir, seq=seq,
+                xlsx_id=xlsx_id,
             )
             records.append((seq, name, f"{sig_fmt}  ({ago_str})", jpeg_path, xlsx_id))
             seq += 1
@@ -2379,6 +2459,8 @@ def generate_merchant_status_report(conn, merchants_info: list[dict]) -> None:
                     ltf   = f"~{closed_from_val}"
                     print(f"STATUS        : {'INACTIVE':<10} (permanently closed)")
                     print(f"last_txn      : {ltf}  ({ago_s})")
+                    bt      = info.get("batch_type")
+                    xlsx_id = info.get("_xlsx_id") or ""
                     jpeg_path = _save_card_jpeg(
                         merchant_name=m_name, status="INACTIVE", confidence=0.0,
                         last_txn_fmt=ltf, ago_str=ago_s,
@@ -2387,10 +2469,9 @@ def generate_merchant_status_report(conn, merchants_info: list[dict]) -> None:
                         activity_ratio=0.0, max_gap=0,
                         reasons=[f"last txn {ago_s}"],
                         now_wib=now_wib, output_dir=output_dir, seq=seq,
+                        xlsx_id=xlsx_id,
                     )
                     excel_records.append((seq, m_name, f"{ltf}  ({ago_s})", jpeg_path))
-                    bt      = info.get("batch_type")
-                    xlsx_id = info.get("_xlsx_id") or ""
                     if bt in ("xlsx-new", "xlsx-update", "xlsx-delete"):
                         batch_records.append((seq, m_name, f"{ltf}  ({ago_s})", jpeg_path, bt, xlsx_id))
                     seq += 1
@@ -2407,6 +2488,7 @@ def generate_merchant_status_report(conn, merchants_info: list[dict]) -> None:
                             activity_ratio=0.0, max_gap=0,
                             reasons=["no transaction data found"],
                             now_wib=now_wib, output_dir=output_dir, seq=seq,
+                            xlsx_id=xlsx_id,
                         )
                         excel_records.append((seq, m_name, "—  (no data)", jpeg_path))
                         batch_records.append((seq, m_name, "—  (no data)", jpeg_path, bt, xlsx_id))
@@ -2499,6 +2581,8 @@ def generate_merchant_status_report(conn, merchants_info: list[dict]) -> None:
                     print(f"  - {r}")
 
             # ── save JPEG card ─────────────────────────────────────────────
+            bt      = info.get("batch_type")
+            xlsx_id = info.get("_xlsx_id") or ""
             jpeg_path = _save_card_jpeg(
                 merchant_name=m_name,
                 status=status,
@@ -2513,10 +2597,9 @@ def generate_merchant_status_report(conn, merchants_info: list[dict]) -> None:
                 now_wib=now_wib,
                 output_dir=output_dir,
                 seq=seq,
+                xlsx_id=xlsx_id,
             )
             excel_records.append((seq, m_name, f"{last_txn_fmt}  ({ago_str})", jpeg_path))
-            bt      = info.get("batch_type")
-            xlsx_id = info.get("_xlsx_id") or ""
             if bt in ("xlsx-new", "xlsx-update", "xlsx-delete"):
                 batch_records.append((seq, m_name, f"{last_txn_fmt}  ({ago_str})", jpeg_path, bt, xlsx_id))
             seq += 1
@@ -2597,23 +2680,50 @@ def _upload_to_gdrive(output_dir: Path) -> None:
         sub_id = service.files().create(body=meta, fields="id").execute()["id"]
         print(f"  [gdrive] Created folder : {date_folder}")
 
-    mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    for fname in ("merchant_activity_report.xlsx", "batch_activity_report.xlsx"):
-        fpath = output_dir / fname
-        if not fpath.exists():
-            continue
-        media = MediaFileUpload(str(fpath), mimetype=mime, resumable=True)
+    def _upsert(fname: str, local_path: Path, mime: str) -> str:
+        """Upload or update a file in sub_id; return the Drive file ID."""
+        media = MediaFileUpload(str(local_path), mimetype=mime, resumable=True)
         q2 = f"name='{fname}' and '{sub_id}' in parents and trashed=false"
         existing = service.files().list(q=q2, fields="files(id)").execute()["files"]
         if existing:
-            service.files().update(fileId=existing[0]["id"], media_body=media).execute()
+            fid = existing[0]["id"]
+            service.files().update(fileId=fid, media_body=media).execute()
             print(f"  [gdrive] Updated  : {fname}")
         else:
-            service.files().create(
+            fid = service.files().create(
                 body={"name": fname, "parents": [sub_id]},
                 media_body=media, fields="id",
-            ).execute()
+            ).execute()["id"]
             print(f"  [gdrive] Uploaded : {fname}")
+        return fid
+
+    # Upload merchant_activity_report.xlsx (unchanged, embedded images)
+    xlsx_mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    if (output_dir / "merchant_activity_report.xlsx").exists():
+        _upsert("merchant_activity_report.xlsx",
+                output_dir / "merchant_activity_report.xlsx", xlsx_mime)
+
+    # If meta JSON exists: upload JPEGs → build Drive-linked batch xlsx → upload it
+    import json as _json
+    meta_path = output_dir / "batch_activity_report_meta.json"
+    if meta_path.exists() and (output_dir / "batch_activity_report.xlsx").exists():
+        meta = _json.loads(meta_path.read_text())
+        drive_links: dict[str, str] = {}
+        jpeg_count = 0
+        for recs in meta.values():
+            for rec in recs:
+                jp = rec.get("jpeg_path", "")
+                if not jp or not Path(jp).exists():
+                    continue
+                fid = _upsert(Path(jp).name, Path(jp), "image/jpeg")
+                drive_links[jp] = f"https://drive.google.com/file/d/{fid}/view"
+                jpeg_count += 1
+        print(f"  [gdrive] JPEGs    : {jpeg_count} uploaded")
+        linked_path = _build_linked_batch_excel(meta, drive_links, output_dir)
+        _upsert("batch_activity_report.xlsx", linked_path, xlsx_mime)
+    elif (output_dir / "batch_activity_report.xlsx").exists():
+        _upsert("batch_activity_report.xlsx",
+                output_dir / "batch_activity_report.xlsx", xlsx_mime)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
