@@ -1919,19 +1919,15 @@ def main() -> None:
         csv_rows = _load_all_csv_rows()
         print(f"      {len(csv_rows)} rows loaded.")
 
-        append_start = get_append_start_date(conn) or DATE_START
-        if append_start > DATE_END:
-            print(f"      Already up to date (last date: {append_start - timedelta(days=1)}).")
-            conn.close()
-            return
-        print(f"      Appending from {append_start} → {DATE_END} "
-              f"({(DATE_END - append_start).days + 1} days).")
+        append_start    = get_append_start_date(conn) or DATE_START
+        already_current = append_start > DATE_END
 
         print("[2/4] Loading reference data (QRIS issuers)...")
         qris_issuer_ids = load_qris_issuers(conn)
 
         print("[2b/4] Checking for new merchants in list_edc.csv...")
         _new_rows = filter_new_csv_rows(conn, csv_rows)
+        _new_ids: set[int] = set()
         if _new_rows:
             print(f"      Found {len(_new_rows)} new merchants — inserting...")
             _aq_ids    = load_acquirers(conn)
@@ -1941,22 +1937,36 @@ def main() -> None:
                 conn, _new_rows, _aq_ids, _area_map, idx_offset=_idx_off
             )
             _sync_merchant_data(conn)
-            # Generate full historical transactions for new merchants up to (but not
-            # including) append_start — the regular append loop below covers the rest.
-            hist_end = min(append_start - timedelta(days=1), DATE_END)
-            if DATE_START <= hist_end:
-                _card_ids_tmp = load_cards_from_db(conn)
-                reset_trace_seq(conn)
-                generate_and_insert_transactions(
-                    conn, _new_info, _card_ids_tmp, qris_issuer_ids,
-                    start_date=DATE_START, end_date=hist_end,
-                )
-            print(f"      {len(_new_rows)} merchants inserted, history seeded to {hist_end}.")
+            _new_ids   = {m["merchant_id"] for m in _new_info}
+            _card_ids_tmp = load_cards_from_db(conn)
+            reset_trace_seq(conn)
+            generate_and_insert_transactions(
+                conn, _new_info, _card_ids_tmp, qris_issuer_ids,
+                start_date=DATE_START, end_date=DATE_END,
+            )
+            print(f"      {len(_new_rows)} merchants inserted, history seeded {DATE_START} → {DATE_END}.")
         else:
             print("      No new merchants.")
 
+        if already_current:
+            if not _new_rows:
+                print(f"      Already up to date (last date: {append_start - timedelta(days=1)}).")
+                conn.close()
+                return
+            print("\nGenerating merchant activity report...")
+            merchants_info = load_merchants_from_db(conn, csv_rows)
+            generate_merchant_status_report(conn, merchants_info)
+            conn.close()
+            return
+
+        print(f"      Appending from {append_start} → {DATE_END} "
+              f"({(DATE_END - append_start).days + 1} days).")
+
         print("[3/4] Loading merchants + cards from DB...")
         merchants_info = load_merchants_from_db(conn, csv_rows)
+        # Exclude newly inserted merchants — they already have DATE_START→DATE_END above.
+        if _new_ids:
+            merchants_info = [m for m in merchants_info if m["merchant_id"] not in _new_ids]
         card_ids       = load_cards_from_db(conn)
         print(f"      {len(merchants_info)} merchants, {len(card_ids)} cards.")
 
