@@ -931,11 +931,17 @@ def load_merchants_from_db(conn, csv_rows: list[dict]) -> list[dict]:
 
 
 def filter_new_csv_rows(conn, csv_rows: list[dict]) -> list[dict]:
-    """Return only rows whose name1 is not already in the merchants table."""
+    """Return only rows not already in the merchants table (matched by name or reference)."""
     with conn.cursor() as cur:
-        cur.execute("SELECT merchant_name FROM merchants")
-        existing = {r[0] for r in cur.fetchall()}
-    return [r for r in csv_rows if r.get("name1", "").strip() not in existing]
+        cur.execute("SELECT merchant_name, reference FROM merchants")
+        rows = cur.fetchall()
+    existing_names = {r[0] for r in rows}
+    existing_refs  = {r[1] for r in rows if r[1]}
+    return [
+        r for r in csv_rows
+        if r.get("name1", "").strip() not in existing_names
+        and r.get("_xlsx_id", "").strip() not in existing_refs
+    ]
 
 
 def get_merchant_idx_offset(conn) -> int:
