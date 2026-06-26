@@ -605,6 +605,67 @@ CATEGORY_DEFAULT_HOURS: dict[str, tuple[time, time] | None] = {
     "Karaoke":                       (time(14, 0), time(23, 0)),
     "Transportation Service":        (time( 7, 0), time(22, 0)),
     "Wedding Services and Bridal Studio": (time(10, 0), time(18, 0)),
+    # ── F&B (additional) ─────────────────────────────────────────────────────
+    "Tea House":                          (time( 8, 0), time(21, 0)),
+    "Doughnut Shop":                      (time( 7, 0), time(20, 0)),
+    "Cafeteria":                          (time( 7, 0), time(17, 0)),
+    "Food Market-Stall":                  (time( 6, 0), time(17, 0)),
+    "Food Production":                    (time( 8, 0), time(17, 0)),
+    # ── Retail (additional) ──────────────────────────────────────────────────
+    "Furniture Store":                    (time( 9, 0), time(20, 0)),
+    "Home Specialty Store":               (time( 9, 0), time(20, 0)),
+    "Consumer Electronics Store":         (time(10, 0), time(21, 0)),
+    "Gift, Antique and Art":              (time(10, 0), time(19, 0)),
+    "Pet Supply":                         (time( 9, 0), time(20, 0)),
+    "Toy Store":                          (time(10, 0), time(21, 0)),
+    "Auto Parts":                         (time( 8, 0), time(17, 0)),
+    "Paint Store":                        (time( 8, 0), time(17, 0)),
+    "Power Equipment Dealer":             (time( 8, 0), time(17, 0)),
+    "Specialty Clothing Store":           (time(10, 0), time(21, 0)),
+    "Speciality Store":                   (time( 9, 0), time(21, 0)),  # spelling variant
+    "Drugstore":                          (time( 8, 0), time(22, 0)),
+    "Drugstore or Pharmacy":              (time( 8, 0), time(22, 0)),
+    # ── Beauty / wellness (additional) ───────────────────────────────────────
+    "Hair Salon":                         (time( 9, 0), time(20, 0)),
+    "Hair And Beauty":                    (time( 9, 0), time(20, 0)),  # case variant
+    "Nail Salon":                         (time( 9, 0), time(20, 0)),
+    "Body Piercing and Tattoos":          (time(11, 0), time(21, 0)),
+    # ── Automotive / transport ───────────────────────────────────────────────
+    "Motorcycle Dealership":              (time( 9, 0), time(17, 0)),
+    "Motorcycle Service and Maintenance": (time( 8, 0), time(17, 0)),
+    "Truck Repair":                       (time( 8, 0), time(17, 0)),
+    "Bicycle and Bicycle Accessories Shop": (time( 9, 0), time(18, 0)),
+    "Cargo Transportation":               (time( 8, 0), time(17, 0)),
+    # ── Services (additional) ────────────────────────────────────────────────
+    "Tailor and Alteration":              (time( 9, 0), time(18, 0)),
+    "Customer Care-Service Center":       (time( 9, 0), time(18, 0)),
+    "Travel Agent-Ticketing":             (time( 9, 0), time(18, 0)),
+    "Telephone Service":                  (time( 9, 0), time(18, 0)),
+    "Photography":                        (time( 9, 0), time(20, 0)),
+    # ── Business / professional ──────────────────────────────────────────────
+    "Business Facility":                  (time( 8, 0), time(17, 0)),
+    "Management and Consulting Services": (time( 8, 0), time(17, 0)),
+    "Advertising-Marketing, PR and Market Research": (time( 8, 0), time(17, 0)),
+    "Finance and Insurance":              (time( 8, 0), time(17, 0)),
+    "Financial Investment Firm":          (time( 8, 0), time(17, 0)),
+    "Human Resources and Recruiting Services": (time( 8, 0), time(17, 0)),
+    "Legal Services":                     (time( 8, 0), time(17, 0)),
+    "Attorney":                           (time( 8, 0), time(17, 0)),
+    "Tax Service":                        (time( 8, 0), time(17, 0)),
+    "Property Management":                (time( 8, 0), time(17, 0)),
+    # ── Health (additional) ──────────────────────────────────────────────────
+    "Healthcare and Healthcare Support Services": (time( 8, 0), time(17, 0)),
+    "Specialty Trade Contractors":        (time( 8, 0), time(17, 0)),
+    # ── Recreation / entertainment (additional) ──────────────────────────────
+    "Entertainment and Recreation":       (time(10, 0), time(22, 0)),
+    "Sports Complex-Stadium":             (time( 7, 0), time(22, 0)),
+    "Shopping Mall":                      (time(10, 0), time(22, 0)),
+    "Outdoor-Recreation":                 (time( 7, 0), time(18, 0)),
+    "Video and Game Rental":              (time(10, 0), time(21, 0)),
+    "Fine Arts":                          (time(10, 0), time(19, 0)),
+    # ── Education / community ────────────────────────────────────────────────
+    "Kindergarten and Childcare":         (time( 7, 0), time(16, 0)),
+    "Mosque":                             (time( 8, 0), time(17, 0)),
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
