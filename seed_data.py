@@ -1919,11 +1919,7 @@ def main() -> None:
         csv_rows = _load_all_csv_rows()
         print(f"      {len(csv_rows)} rows loaded.")
 
-        append_start = get_append_start_date(conn)
-        if append_start is None:
-            print("      No existing transactions found — run a full seed first.")
-            conn.close()
-            return
+        append_start = get_append_start_date(conn) or DATE_START
         if append_start > DATE_END:
             print(f"      Already up to date (last date: {append_start - timedelta(days=1)}).")
             conn.close()
