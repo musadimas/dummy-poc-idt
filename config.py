@@ -20,7 +20,6 @@ DB_CONFIG = {
 }
 
 INPUT_DIR  = Path(__file__).parent / "input"
-CSV_PATH   = INPUT_DIR / "poi_edc.csv"
 DATE_START = date(2025, 1, 1)
 DATE_END   = date.today()         # inclusive
 
@@ -642,5 +641,5 @@ REALTIME_ACTIVE_DAYS = 90
 # INPUT PATH CONSTANTS
 # ──────────────────────────────────────────────────────────────────────────────
 
-_BATCH_UNIFIED_CSV = INPUT_DIR / "list_edc.csv"
-_REALTIME_CSV      = INPUT_DIR / "list_realtime.csv"
+BATCH_UNIFIED_CSV = INPUT_DIR / "list_edc.csv"
+REALTIME_CSV      = INPUT_DIR / "list_realtime.csv"

@@ -53,6 +53,7 @@ CREATE TABLE merchants (
     mcc_code      CHAR(4)      NOT NULL,           -- ISO 18245 MCC
     address       TEXT,
     city          VARCHAR(100),                    -- denormalised display name
+    reference     VARCHAR
     admin_area_id INT          REFERENCES admin_areas(area_id),  -- FK to deepest known level
     latitude      DECIMAL(10,8),                   -- ±90 with 8 decimal places
     longitude     DECIMAL(11,8),                   -- ±180 with 8 decimal places

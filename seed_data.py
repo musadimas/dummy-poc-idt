@@ -10,7 +10,6 @@ Override DB connection via environment variables:
     PG_HOST, PG_PORT, PG_DB, PG_USER, PG_PASSWORD
 """
 
-import csv
 import math
 import os
 import random
@@ -25,7 +24,17 @@ import psycopg2
 from psycopg2.extras import execute_values
 
 from config import *
+from config import (
+    BATCH_UNIFIED_CSV, REALTIME_CSV,
+    _C_BG, _C_PANEL, _C_BORDER, _C_NAME, _C_LABEL, _C_VALUE,
+    _C_ACTIVE, _C_INACTIVE, _C_REASON, _C_DIVIDER,
+    _CARD_W, _PAD, _LH,
+)
 from helpers import *
+from helpers import (
+    _parse_closed_from, _resolve_admin_tuple,
+    _load_font, _format_ago, _read_unified_csv,
+)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # DATABASE HELPERS
@@ -57,12 +66,13 @@ def reset_database(conn) -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _ensure_merchant_columns(conn) -> None:
-    """Add reference and merchant_status columns to merchants if not already present."""
+    """Add reference, merchant_status, and closed_at columns to merchants if not already present."""
     with conn.cursor() as cur:
         cur.execute("""
             ALTER TABLE merchants
                 ADD COLUMN IF NOT EXISTS reference       VARCHAR(255),
-                ADD COLUMN IF NOT EXISTS merchant_status VARCHAR(20) DEFAULT 'ACTIVE'
+                ADD COLUMN IF NOT EXISTS merchant_status VARCHAR(20) DEFAULT 'ACTIVE',
+                ADD COLUMN IF NOT EXISTS closed_at       DATE
         """)
     conn.commit()
 
@@ -77,7 +87,7 @@ def _sync_merchant_data(conn) -> None:
     """
     import csv as _csv_mod
 
-    csv_path = _BATCH_UNIFIED_CSV
+    csv_path = BATCH_UNIFIED_CSV
     if not csv_path.exists():
         return
 
@@ -108,9 +118,27 @@ def _sync_merchant_data(conn) -> None:
             w.writerows(rows)
         print(f"      [sync] Normalised {csv_changed} closed_from date(s) in {csv_path.name}")
 
-    # Build name→(id, closed_from) lookup for all rows that have an id
-    ref_map: dict[str, str] = {}
-    inactive_names: set[str] = set()
+    # Refresh list_realtime.csv from the unified CSV so --report always has up-to-date signal data
+    rt_rows = [r for r in rows if r.get("report_status", "").lower() == "realtime"]
+    if rt_rows:
+        parsed_rt = _read_unified_csv(csv_path)
+        parsed_rt = [r for r in parsed_rt if r.get("batch_type") == "xlsx-realtime"]
+        with open(REALTIME_CSV, "w", newline="", encoding="utf-8") as _rtf:
+            _w = _csv_mod.DictWriter(_rtf, fieldnames=["id", "poi_nm", "last_signal", "category", "street"])
+            _w.writeheader()
+            for _r in parsed_rt:
+                _w.writerow({
+                    "id":          _r.get("_xlsx_id", ""),
+                    "poi_nm":      _r.get("name1", ""),
+                    "last_signal": _r.get("last_signal", ""),
+                    "category":    _r.get("primarycategorynm", ""),
+                    "street":      _r.get("streetname", ""),
+                })
+        print(f"      [sync] Refreshed list_realtime.csv ({len(parsed_rt)} rows)")
+
+    # Build name→id and name→closed_date lookups
+    ref_map:    dict[str, str]  = {}   # name → csv id
+    closed_map: dict[str, date] = {}   # name → closed_at date (delete rows only)
     for row in rows:
         name = row.get("name", "").strip()
         if not name:
@@ -118,17 +146,22 @@ def _sync_merchant_data(conn) -> None:
         csv_id = row.get("id", "").strip()
         if csv_id:
             ref_map[name] = csv_id
-        if row.get("report_status", "").lower() == "delete" and row.get("closed_from", "").strip():
-            inactive_names.add(name)
+        if row.get("report_status", "").lower() == "delete":
+            cf_str = row.get("closed_from", "").strip()
+            if cf_str:
+                try:
+                    closed_map[name] = date.fromisoformat(cf_str)
+                except ValueError:
+                    pass
 
-    if not ref_map and not inactive_names:
+    if not ref_map and not closed_map:
         return
 
     with conn.cursor() as cur:
         cur.execute("SELECT merchant_name, merchant_id FROM merchants")
         db_map = {n: mid for n, mid in cur.fetchall()}
 
-    updated_ref = updated_status = 0
+    updated_ref = updated_status = updated_closed = 0
     with conn.cursor() as cur:
         for name, csv_id in ref_map.items():
             m_id = db_map.get(name)
@@ -140,22 +173,26 @@ def _sync_merchant_data(conn) -> None:
             )
             updated_ref += cur.rowcount
 
-        for name in inactive_names:
+        for name, closed_date in closed_map.items():
             m_id = db_map.get(name)
             if m_id is None:
                 continue
             cur.execute(
-                "UPDATE merchants SET merchant_status = 'INACTIVE' "
-                "WHERE merchant_id = %s AND (merchant_status IS NULL OR merchant_status != 'INACTIVE')",
-                (m_id,),
+                "UPDATE merchants "
+                "SET merchant_status = 'INACTIVE', closed_at = %s "
+                "WHERE merchant_id = %s "
+                "  AND (merchant_status IS NULL OR merchant_status != 'INACTIVE')",
+                (closed_date, m_id),
             )
-            updated_status += cur.rowcount
+            if cur.rowcount:
+                updated_status += 1
+                updated_closed += 1
 
     conn.commit()
     if updated_ref:
         print(f"      [sync] Updated reference for {updated_ref} merchant(s)")
     if updated_status:
-        print(f"      [sync] Marked {updated_status} merchant(s) as INACTIVE")
+        print(f"      [sync] Marked {updated_status} merchant(s) as INACTIVE with closed_at")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -521,7 +558,7 @@ def generate_and_insert_transactions(
         vol_min, vol_max = VOLUME_PROFILE.get(category, DEFAULT_VOLUME)
         amt_min, amt_max = AMOUNT_RANGE.get(category, DEFAULT_AMOUNT)
         qris_prob        = QRIS_PROBABILITY.get(category, DEFAULT_QRIS_PROB)
-        closed_from      = info.get("closed_from")
+        closed_from      = info.get("closed_at") or info.get("closed_from")
 
         for txn_date in date_range:
             if closed_from and txn_date >= closed_from:
@@ -850,7 +887,8 @@ def load_merchants_from_db(conn, csv_rows: list[dict]) -> list[dict]:
     with conn.cursor() as cur:
         cur.execute("""
             SELECT m.merchant_id, m.merchant_name, m.merchant_code, m.mcc_code,
-                   t.terminal_id, t.terminal_code, t.serial_number, t.model
+                   t.terminal_id, t.terminal_code, t.serial_number, t.model,
+                   m.reference, m.closed_at
             FROM   merchants m
             JOIN   terminals t ON t.merchant_id = m.merchant_id
         """)
@@ -860,7 +898,7 @@ def load_merchants_from_db(conn, csv_rows: list[dict]) -> list[dict]:
     _mcc_to_cat = {v: k for k, v in CATEGORY_TO_MCC.items()}
 
     result = []
-    for merchant_id, merchant_name, merchant_code, mcc_code, terminal_id, terminal_code, serial_number, model in db_rows:
+    for merchant_id, merchant_name, merchant_code, mcc_code, terminal_id, terminal_code, serial_number, model, reference, closed_at in db_rows:
         sched = csv_schedule.get(merchant_name)
         if sched is None:
             # Batch xlsx merchant not in csv_rows — build default schedule from MCC
@@ -881,6 +919,8 @@ def load_merchants_from_db(conn, csv_rows: list[dict]) -> list[dict]:
             "terminal_code": terminal_code,
             "serial_number": serial_number,
             "model":         model,
+            "reference":     reference,
+            "closed_at":     closed_at,
             "category":      sched.get("category", ""),
             "schedule":      sched.get("schedule", {}),
             "closed_from":   sched.get("closed_from"),
@@ -1338,7 +1378,7 @@ def _save_batch_excel_report(
             for s, n, ls, jp, xid in recs
         ]
     (output_dir / "batch_activity_report_meta.json").write_text(
-        _json.dumps(_meta, indent=2, ensure_ascii=False)
+        _json.dumps(_meta, indent=2, ensure_ascii=False), encoding="utf-8"
     )
 
     return xlsx_path
@@ -1400,10 +1440,10 @@ def _generate_realtime_records(output_dir: Path, seq_start: int, now_wib) -> "tu
     import csv as _csv_mod
     records = []
     seq = seq_start
-    if not _REALTIME_CSV.exists():
+    if not REALTIME_CSV.exists():
         return records, seq
 
-    with open(_REALTIME_CSV, newline="", encoding="utf-8") as f:
+    with open(REALTIME_CSV, newline="", encoding="utf-8") as f:
         for row in _csv_mod.DictReader(f):
             raw_name  = row.get("poi_nm", "")
             street    = row.get("street", "")
@@ -1497,7 +1537,7 @@ def generate_merchant_status_report(conn, merchants_info: list[dict]) -> None:
 
             if last_txn_utc is None:
                 print(f"\n{'─'*62}\n{m_name}")
-                closed_from_val = info.get("closed_from")
+                closed_from_val = info.get("closed_at") or info.get("closed_from")
                 if closed_from_val:
                     # Closed before the seeded period — synthesise ago from the closure date
                     h_ago = (ref_time - datetime.combine(closed_from_val, time(23, 59, 59)).replace(tzinfo=WIB)).total_seconds() / 3600
@@ -1608,7 +1648,7 @@ def generate_merchant_status_report(conn, merchants_info: list[dict]) -> None:
                 reasons.append(f"{c30d} approved txn / 30d ({qris_30d} QRIS, {edc_30d} EDC)")
 
             # ── override: permanently closed merchants ─────────────────────
-            closed_from_val = info.get("closed_from")
+            closed_from_val = info.get("closed_at") or info.get("closed_from")
             if closed_from_val:
                 status = "INACTIVE"
                 reasons.insert(0, f"last txn {ago_str}")
@@ -1692,7 +1732,7 @@ def _get_gdrive_service():
         else:
             flow = InstalledAppFlow.from_client_secrets_file(str(GDRIVE_CREDENTIALS), GDRIVE_SCOPES)
             creds = flow.run_local_server(port=0)
-        GDRIVE_TOKEN.write_text(creds.to_json())
+        GDRIVE_TOKEN.write_text(creds.to_json(), encoding="utf-8")
     return build("drive", "v3", credentials=creds)
 
 
@@ -1776,18 +1816,12 @@ def _upload_to_gdrive(output_dir: Path) -> None:
 # MAIN
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _load_xlsx_supplement(csv_rows: list[dict]) -> int:
-    """
-    Append list_edc.csv rows to csv_rows in-place (for schedule lookup / batch tagging).
-    Returns the number of rows appended.
-    """
-    count = 0
-    if _BATCH_UNIFIED_CSV.exists():
-        rows_u = _read_unified_csv(_BATCH_UNIFIED_CSV)
-        non_rt = [r for r in rows_u if r.get("batch_type") != "xlsx-realtime"]
-        csv_rows.extend(non_rt)
-        count += len(non_rt)
-    return count
+def _load_all_csv_rows() -> list[dict]:
+    """Load all non-realtime rows from list_edc.csv (unified input source)."""
+    if not BATCH_UNIFIED_CSV.exists():
+        return []
+    rows = _read_unified_csv(BATCH_UNIFIED_CSV)
+    return [r for r in rows if r.get("batch_type") != "xlsx-realtime"]
 
 
 def main() -> None:
@@ -1802,7 +1836,6 @@ def main() -> None:
     append_mode          = "--append"          in sys.argv
     reset_mode           = "--reset"           in sys.argv
     add_merchants_mode   = "--add-merchants"   in sys.argv
-    batch_seed_mode      = "--batch-seed"      in sys.argv
     upload_mode          = "--upload"          in sys.argv
 
     conn = get_connection()
@@ -1827,7 +1860,7 @@ def main() -> None:
 
     # Auto-detect: if no explicit mode and DB already has data → append instead of wipe
     if not any([reset_mode, purge_mode, append_mode, report_mode, report_selected_mode,
-                prune_closed_mode, add_merchants_mode, batch_seed_mode]):
+                prune_closed_mode, add_merchants_mode]):
         with conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM transactions")
             if cur.fetchone()[0] > 0:
@@ -1841,8 +1874,6 @@ def main() -> None:
         mode_label = "PURGE DATE RANGE then re-seed"
     elif prune_closed_mode:
         mode_label = "PRUNE CLOSED MERCHANTS"
-    elif batch_seed_mode:
-        mode_label = "BATCH SEED (list_new + list_update xlsx)"
     elif add_merchants_mode:
         mode_label = "ADD NEW MERCHANTS (no-touch existing)"
     elif append_mode:
@@ -1856,20 +1887,18 @@ def main() -> None:
     print("  EDC POC Seeder")
     print(f"  Mode       : {mode_label}")
     print(f"  Date range : {DATE_START} — {DATE_END}")
-    print(f"  CSV        : {CSV_PATH}")
+    print(f"  Input      : {BATCH_UNIFIED_CSV}")
     print(f"  Database   : {DB_CONFIG['dbname']}@{DB_CONFIG['host']}:{DB_CONFIG['port']}")
     print("=" * 60)
 
     _ensure_merchant_columns(conn)
 
-    if report_mode or report_selected_mode or append_mode or batch_seed_mode:
-        _sync_merchant_data(conn)
+    _sync_merchant_data(conn)
 
     if prune_closed_mode:
-        print("[1/3] Loading CSV for closure dates...")
-        with open(CSV_PATH, encoding="utf-8-sig", newline="") as f:
-            csv_rows = [r for r in csv.DictReader(f) if r.get("status", "").strip() == "ACTIVE"]
-        print(f"      {len(csv_rows)} active POIs loaded.")
+        print("[1/3] Loading list_edc.csv for closure dates...")
+        csv_rows = _load_all_csv_rows()
+        print(f"      {len(csv_rows)} rows loaded.")
 
         print("[2/3] Pruning closed merchant data...")
         prune_closed_merchants(conn, csv_rows)
@@ -1884,11 +1913,9 @@ def main() -> None:
         return
 
     if append_mode:
-        print("[1/4] Loading CSV + batch xlsx for schedule data...")
-        with open(CSV_PATH, encoding="utf-8-sig", newline="") as f:
-            csv_rows = [r for r in csv.DictReader(f) if r.get("status", "").strip() == "ACTIVE"]
-        _n_xlsx = _load_xlsx_supplement(csv_rows)
-        print(f"      {len(csv_rows) - _n_xlsx} CSV POIs + {_n_xlsx} xlsx rows loaded.")
+        print("[1/4] Loading list_edc.csv for schedule data...")
+        csv_rows = _load_all_csv_rows()
+        print(f"      {len(csv_rows)} rows loaded.")
 
         append_start = get_append_start_date(conn)
         if append_start is None:
@@ -1931,11 +1958,9 @@ def main() -> None:
 
     if report_mode:
         # Skip all seeding — load existing merchants from DB and generate report only
-        print("[1/2] Loading CSV + batch xlsx for schedule data...")
-        with open(CSV_PATH, encoding="utf-8-sig", newline="") as f:
-            csv_rows = [r for r in csv.DictReader(f) if r.get("status", "").strip() == "ACTIVE"]
-        _n_xlsx = _load_xlsx_supplement(csv_rows)
-        print(f"      {len(csv_rows) - _n_xlsx} CSV POIs + {_n_xlsx} xlsx rows loaded.")
+        print("[1/2] Loading list_edc.csv for schedule data...")
+        csv_rows = _load_all_csv_rows()
+        print(f"      {len(csv_rows)} rows loaded.")
 
         print("[2/2] Loading merchants from DB...")
         merchants_info = load_merchants_from_db(conn, csv_rows)
@@ -1948,16 +1973,14 @@ def main() -> None:
 
     if report_selected_mode:
         # Same as --report but restricted to merchants present in the input files
-        print("[1/2] Loading CSV + batch xlsx for schedule data...")
-        with open(CSV_PATH, encoding="utf-8-sig", newline="") as f:
-            csv_rows = [r for r in csv.DictReader(f) if r.get("status", "").strip() == "ACTIVE"]
-        _n_xlsx = _load_xlsx_supplement(csv_rows)
-        print(f"      {len(csv_rows) - _n_xlsx} CSV POIs + {_n_xlsx} xlsx rows loaded.")
+        print("[1/2] Loading list_edc.csv for schedule data...")
+        csv_rows = _load_all_csv_rows()
+        print(f"      {len(csv_rows)} rows loaded.")
 
         print("[2/2] Loading merchants from DB...")
         merchants_info = load_merchants_from_db(conn, csv_rows)
-        input_names = {r.get("name1", "").strip() for r in csv_rows if r.get("name1", "").strip()}
-        merchants_info = [m for m in merchants_info if m["merchant_name"] in input_names]
+        input_refs = {r.get("_xlsx_id", "").strip() for r in csv_rows if r.get("_xlsx_id", "").strip()}
+        merchants_info = [m for m in merchants_info if m.get("reference") in input_refs]
         print(f"      {len(merchants_info)} merchants matched to input files.")
 
         print("\nGenerating merchant activity report (selected)...")
@@ -1965,142 +1988,10 @@ def main() -> None:
         conn.close()
         return
 
-    if batch_seed_mode:
-        print("[1/7] Reading list_edc.csv...")
-        batch_rows: list[dict] = []
-        rt_rows:    list[dict] = []
-        if _BATCH_UNIFIED_CSV.exists():
-            rows_u     = _read_unified_csv(_BATCH_UNIFIED_CSV)
-            rt_rows    = [r for r in rows_u if r.get("batch_type") == "xlsx-realtime"]
-            batch_rows = [r for r in rows_u if r.get("batch_type") != "xlsx-realtime"]
-            del_rows   = [r for r in batch_rows if r.get("batch_type") == "xlsx-delete"]
-            print(f"      list_edc.csv : {len(batch_rows)} batch rows, {len(rt_rows)} realtime")
-        else:
-            print(f"      list_edc.csv : not found — nothing to do.")
-            conn.close()
-            return
-        if rt_rows:
-            import csv as _csv_mod
-            with open(_REALTIME_CSV, "w", newline="", encoding="utf-8") as _rtf:
-                _w = _csv_mod.DictWriter(_rtf, fieldnames=["id", "poi_nm", "last_signal", "category", "street"])
-                _w.writeheader()
-                for _r in rt_rows:
-                    _w.writerow({
-                        "id":          _r.get("_xlsx_id", ""),
-                        "poi_nm":      _r.get("name1", ""),
-                        "last_signal": _r.get("last_signal", ""),
-                        "category":    _r.get("primarycategorynm", ""),
-                        "street":      _r.get("streetname", ""),
-                    })
-            print(f"      list_realtime.csv   : {len(rt_rows)} rows written")
-
-        if not batch_rows:
-            print("      No batch rows loaded — nothing to do.")
-            conn.close()
-            return
-
-        print("[2/7] Identifying merchants not yet in DB...")
-        new_to_db = filter_new_csv_rows(conn, batch_rows)
-        print(f"      {len(new_to_db)} new (not in DB), "
-              f"{len(batch_rows) - len(new_to_db)} already exist.")
-
-        print("[3/7] Loading reference data...")
-        acquirer_ids    = load_acquirers(conn)
-        qris_issuer_ids = load_qris_issuers(conn)
-
-        if new_to_db:
-            idx_offset = get_merchant_idx_offset(conn)
-            print(f"      Sequence offset: {idx_offset}")
-
-            print("[4/7] Inserting admin areas (idempotent)...")
-            area_map = insert_admin_areas(conn, new_to_db)
-
-            print("[5/7] Inserting new merchants + terminals...")
-            new_merchants_info = insert_merchants_and_terminals(
-                conn, new_to_db, acquirer_ids, area_map, idx_offset=idx_offset
-            )
-            print(f"      {len(new_merchants_info)} merchants and terminals inserted.")
-        else:
-            new_merchants_info = []
-            print("[4/7] No new merchants — skipping insert.")
-            print("[5/7] (skipped)")
-
-        # Also seed transactions for batch merchants already in DB but with zero transactions
-        with open(CSV_PATH, encoding="utf-8-sig", newline="") as f:
-            csv_base = [r for r in csv.DictReader(f) if r.get("status", "").strip() == "ACTIVE"]
-        all_schedule_rows = csv_base + batch_rows
-        all_batch_info = load_merchants_from_db(conn, all_schedule_rows)
-
-        batch_names = {r.get("name1", "").strip() for r in batch_rows}
-        batch_info_only = [m for m in all_batch_info if m["merchant_name"] in batch_names]
-
-        # Prune post-closure transactions for delete merchants
-        del_names = {r.get("name1", "").strip() for r in del_rows}
-        del_info  = [m for m in all_batch_info if m["merchant_name"] in del_names]
-        if del_info:
-            print(f"      Pruning post-closure transactions for {len(del_info)} deleted merchant(s)...")
-            with conn.cursor() as cur:
-                for m_info in del_info:
-                    cf = m_info.get("closed_from")
-                    if not cf:
-                        continue
-                    close_ts = datetime.combine(cf, time(0, 0))
-                    cur.execute(
-                        "DELETE FROM transaction_log WHERE transaction_id IN "
-                        "(SELECT transaction_id FROM transactions "
-                        " WHERE merchant_id = %s AND transaction_time >= %s)",
-                        (m_info["merchant_id"], close_ts),
-                    )
-                    cur.execute(
-                        "DELETE FROM transactions WHERE merchant_id = %s AND transaction_time >= %s",
-                        (m_info["merchant_id"], close_ts),
-                    )
-                    cur.execute(
-                        "DELETE FROM settlement WHERE merchant_id = %s AND settlement_date >= %s",
-                        (m_info["merchant_id"], cf),
-                    )
-            conn.commit()
-
-        # Find batch merchants that have no transactions yet (checked after prune)
-        with conn.cursor() as cur:
-            cur.execute("SELECT merchant_id FROM transactions GROUP BY merchant_id")
-            has_txn = {r[0] for r in cur.fetchall()}
-        no_txn_info = [m for m in batch_info_only if m["merchant_id"] not in has_txn]
-
-        if new_merchants_info or no_txn_info:
-            to_seed = new_merchants_info + [m for m in no_txn_info
-                                            if m["merchant_id"] not in
-                                            {x["merchant_id"] for x in new_merchants_info}]
-            print(f"[6/7] Generating transactions for {len(to_seed)} batch merchant(s) with no data...")
-            card_ids = load_cards_from_db(conn)
-            reset_trace_seq(conn)
-            generate_and_insert_transactions(
-                conn, to_seed, card_ids, qris_issuer_ids,
-                start_date=DATE_START, end_date=DATE_END,
-            )
-        else:
-            print("[6/7] All batch merchants already have transactions — skipping.")
-
-        print("\nRow count verification:")
-        with conn.cursor() as cur:
-            for table in ["merchants", "terminals", "transactions", "settlement", "transaction_log"]:
-                cur.execute(f"SELECT COUNT(*) FROM {table}")
-                n = cur.fetchone()[0]
-                print(f"      {table:<22} {n:>10,}")
-
-        print("[7/7] Generating report (all merchants, batch-tagged)...")
-        # Re-load merchants_info so new transaction data is reflected in the report
-        all_merchants_info = load_merchants_from_db(conn, all_schedule_rows)
-        generate_merchant_status_report(conn, all_merchants_info)
-        conn.close()
-        return
-
     if add_merchants_mode:
-        print("[1/6] Loading CSV...")
-        with open(CSV_PATH, encoding="utf-8-sig", newline="") as f:
-            csv_rows = [r for r in csv.DictReader(f)
-                        if r.get("status", "").strip() == "ACTIVE"]
-        print(f"      {len(csv_rows)} active POIs in CSV.")
+        print("[1/6] Loading list_edc.csv...")
+        csv_rows = _load_all_csv_rows()
+        print(f"      {len(csv_rows)} rows loaded.")
 
         print("[2/6] Identifying new merchants...")
         new_rows = filter_new_csv_rows(conn, csv_rows)
@@ -2151,10 +2042,9 @@ def main() -> None:
     qris_issuer_ids = load_qris_issuers(conn)
     print(f"      {len(acquirer_ids)} acquirers, {len(qris_issuer_ids)} QRIS issuers.")
 
-    print("[3/7] Loading CSV...")
-    with open(CSV_PATH, encoding="utf-8-sig", newline="") as f:
-        csv_rows = [r for r in csv.DictReader(f) if r.get("status", "").strip() == "ACTIVE"]
-    print(f"      {len(csv_rows)} active POIs loaded.")
+    print("[3/7] Loading list_edc.csv...")
+    csv_rows = _load_all_csv_rows()
+    print(f"      {len(csv_rows)} rows loaded.")
 
     if purge_mode:
         print("[1/7] Purging transaction data for date range...")
