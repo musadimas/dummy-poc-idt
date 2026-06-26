@@ -1938,11 +1938,24 @@ def main() -> None:
         _new_rows = filter_new_csv_rows(conn, csv_rows)
         if _new_rows:
             print(f"      Found {len(_new_rows)} new merchants — inserting...")
-            _aq_ids   = load_acquirers(conn)
-            _area_map = insert_admin_areas(conn, _new_rows)
-            insert_merchants_and_terminals(conn, _new_rows, _aq_ids, _area_map)
+            _aq_ids    = load_acquirers(conn)
+            _area_map  = insert_admin_areas(conn, _new_rows)
+            _idx_off   = get_merchant_idx_offset(conn)
+            _new_info  = insert_merchants_and_terminals(
+                conn, _new_rows, _aq_ids, _area_map, idx_offset=_idx_off
+            )
             _sync_merchant_data(conn)
-            print(f"      {len(_new_rows)} merchants inserted and synced.")
+            # Generate full historical transactions for new merchants up to (but not
+            # including) append_start — the regular append loop below covers the rest.
+            hist_end = min(append_start - timedelta(days=1), DATE_END)
+            if DATE_START <= hist_end:
+                _card_ids_tmp = load_cards_from_db(conn)
+                reset_trace_seq(conn)
+                generate_and_insert_transactions(
+                    conn, _new_info, _card_ids_tmp, qris_issuer_ids,
+                    start_date=DATE_START, end_date=hist_end,
+                )
+            print(f"      {len(_new_rows)} merchants inserted, history seeded to {hist_end}.")
         else:
             print("      No new merchants.")
 
