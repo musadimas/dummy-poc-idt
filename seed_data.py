@@ -851,231 +851,10 @@ def _normalize_city(name: str) -> str:
     return name
 
 
-def _rand_closed_2024() -> str:
-    """Return a random ISO date string in 2024."""
-    d = date(2024, 1, 1) + timedelta(days=random.randint(0, 365))
-    return d.isoformat()
-
-
-def read_batch_xlsx(xlsx_path: Path, batch_type: str) -> list[dict]:
-    """
-    Read list_new_edc.xlsx (sheet 'new') or list_update_edc.xlsx (sheet 'update')
-    and return rows normalised to the internal csv_row format.
-
-    Key internal fields produced:
-      name1, displaylatitude, displaylongitude, routinglatitude, routinglongitude,
-      primarycategorynm, admin2, admin3, admin4, admin5,
-      hno, streetname, postalcode, PHONE, MOBILE,
-      _schedule_override (dict[int, tuple[time,time]|None]),
-      closed_from (ISO string or ""),
-      batch_type, status="ACTIVE"
-    """
-    try:
-        from openpyxl import load_workbook
-    except ImportError:
-        print(f"      [batch] openpyxl not installed — cannot read {xlsx_path.name}")
-        return []
-
-    sheet_name = "new" if batch_type == "new" else "update"
-    try:
-        wb = load_workbook(str(xlsx_path), read_only=True, data_only=True)
-    except Exception as exc:
-        print(f"      [batch] Cannot open {xlsx_path.name}: {exc}")
-        return []
-
-    if sheet_name not in wb.sheetnames:
-        sheet_name = wb.sheetnames[0]
-    ws = wb[sheet_name]
-
-    rows_iter = ws.iter_rows(values_only=True)
-    raw_headers = next(rows_iter, None)
-    if raw_headers is None:
-        return []
-    headers = [str(h).strip() if h is not None else "" for h in raw_headers]
-
-    result = []
-    for raw_row in rows_iter:
-        row = {headers[i]: (raw_row[i] if i < len(raw_row) else None) for i in range(len(headers))}
-
-        def _s(key: str, *aliases) -> str:
-            for k in (key, *aliases):
-                v = row.get(k)
-                if v is not None:
-                    return str(v).strip()
-            return ""
-
-        if batch_type == "new":
-            id_val    = _s("supplier_poiid")
-            name      = _s("poi_nm")
-            lat       = _s("display_point_latitude")
-            lon       = _s("display_point_longitude")
-            rlat      = _s("routing_latitude")
-            rlon      = _s("routing_longitude")
-            category  = _s("category")
-            hours_raw = _s("operating hours")
-            phone     = _s("phone number")
-            mobile    = _s("Mobile")
-            hno       = _s("house_number")
-            street    = _s("street_name")
-            postal    = _s("postal_code")
-            admin2    = _s("Admin 2")
-            admin3    = _normalize_city(_s("Admin 3"))
-            admin4    = _s("Admin 4")
-            admin5    = _s("Admin 5")
-            sched_override = _parse_hours_text(hours_raw) if hours_raw else None
-            closed_from_str = ""
-        elif batch_type == "delete":
-            id_val    = _s("supplier_poiid")
-            name      = _s("poi_nm")
-            lat       = _s("displaylatitude")
-            lon       = _s("displaylongitude")
-            rlat      = _s("routinglatitude")
-            rlon      = _s("routinglongitude")
-            category  = _s("primarycategorynm")
-            phone     = _s("PHONE")
-            mobile    = _s("MOBILE")
-            hno       = _s("hno")
-            street    = _s("streetname")
-            postal    = _s("postalcode")
-            admin2    = _s("admin2")
-            admin3    = _normalize_city(_s("admin3"))
-            admin4    = _s("admin4")
-            admin5    = _s("admin5")
-            # Hours: day-fraction columns (mondayopening/mondayclosing …)
-            # Normalize None → "" so get_day_window's .strip() calls don't fail
-            _norm_row = {k: ("" if v is None else str(v)) for k, v in row.items()}
-            raw_sched = {wd: get_day_window(_norm_row, wd) for wd in range(7)}
-            sched_override = {
-                wd: (raw_sched[wd] or CATEGORY_DEFAULT_HOURS.get(category))
-                for wd in range(7)
-            }
-            # Read closed_from column (ISO date string added to the xlsx)
-            cf_raw = row.get("closed_from")
-            if isinstance(cf_raw, datetime):
-                closed_from_str = cf_raw.strftime("%Y-%m-%d")
-            elif isinstance(cf_raw, date):
-                closed_from_str = cf_raw.isoformat()
-            elif isinstance(cf_raw, (int, float)):
-                closed_from_str = (
-                    datetime(1899, 12, 30) + timedelta(days=int(cf_raw))
-                ).strftime("%Y-%m-%d")
-            else:
-                closed_from_str = str(cf_raw).strip()[:10] if cf_raw else ""
-        elif batch_type == "5poi":
-            def _g(col):
-                v = row.get(col)
-                return "" if v is None else str(v).strip()
-            id_val   = _g("id")
-            name     = _g("poi_nm")
-            lat      = _g("display_point_latitude")
-            lon      = _g("display_point_longitude")
-            rlat     = lat
-            rlon     = lon
-            category = _g("category")
-            phone    = _g("phone number")
-            mobile   = _g("Mobile")
-            hno      = _g("house_number")
-            street   = _g("street_name")
-            postal   = _g("postal_code")
-            admin2   = _g("Admin 2")
-            admin3   = _normalize_city(_g("Admin 3"))
-            admin4   = _g("Admin 4")
-            admin5   = _g("Admin 5")
-            hours_text = _g("operating hours")
-            parsed_hrs = _parse_hours_text(hours_text) if hours_text else None
-            if parsed_hrs:
-                sched_override = parsed_hrs
-            else:
-                default = CATEGORY_DEFAULT_HOURS.get(category)
-                sched_override = {wd: default for wd in range(7)}
-            # Generate a random last-signal time = today within operational hours
-            _today = date.today()
-            _wd    = _today.weekday()
-            _win   = (sched_override or {}).get(_wd) if sched_override else None
-            if _win and _win[0] and _win[1]:
-                _open_s  = _win[0].hour * 3600 + _win[0].minute * 60
-                _close_s = _win[1].hour * 3600 + _win[1].minute * 60
-                if _close_s > _open_s:
-                    _sig_s = random.randint(_open_s, _close_s - 1)
-                else:
-                    _sig_s = _open_s
-            else:
-                _sig_s = random.randint(8 * 3600, 22 * 3600 - 1)
-            _sig_h, _sig_rem = divmod(_sig_s, 3600)
-            _sig_m, _sig_sec = divmod(_sig_rem, 60)
-            last_signal_str = datetime(_today.year, _today.month, _today.day,
-                                       _sig_h, _sig_m, _sig_sec).strftime("%Y-%m-%d %H:%M:%S")
-            # update if need to add more
-            is_realtime = (category.strip().lower() == "atm") 
-            row_batch_type = "xlsx-realtime" if is_realtime else "xlsx-new"
-            closed_from_str = ""
-        else:
-            id_val    = _s("ID")
-            name      = _s("POI name")
-            lat       = _s("displaylatitude")
-            lon       = _s("displaylongitude")
-            rlat      = _s("routing_latitude")
-            rlon      = _s("routing_longitude")
-            category  = _s("primarycategorynm")
-            hours_raw = _s("operating_hours")
-            phone     = _s("PHONE")
-            mobile    = _s("MOBILE")
-            hno       = _s("house_number")
-            street    = _s("streetname")
-            postal    = _s("postalcode")
-            admin2    = _s("Admin 2")
-            admin3    = _normalize_city(_s("Admin 3"))
-            admin4    = _s("Admin 4")
-            admin5    = _s("Admin 5")
-            sched_override = _parse_hours_text(hours_raw) if hours_raw else None
-            closed_from_str = ""
-
-        if not name:
-            continue
-
-        result.append({
-            "name1":             name,
-            "displaylatitude":   lat,
-            "displaylongitude":  lon,
-            "routinglatitude":   rlat,
-            "routinglongitude":  rlon,
-            "primarycategorynm": category,
-            "admin2":            admin2,
-            "admin3":            admin3,
-            "admin4":            admin4,
-            "admin5":            admin5,
-            "hno":               hno,
-            "streetname":        street,
-            "postalcode":        postal,
-            "PHONE":             phone,
-            "MOBILE":            mobile,
-            "_schedule_override": sched_override,
-            "_xlsx_id":          id_val,
-            "closed_from":       closed_from_str,
-            "batch_type":        row_batch_type if batch_type == "5poi" else f"xlsx-{batch_type}",
-            "last_signal":       last_signal_str if batch_type == "5poi" else "",
-            "status":            "ACTIVE",
-        })
-
-    wb.close()
-
-    # Disambiguate duplicate names by appending street (without "Jalan " prefix).
-    from collections import Counter as _Counter
-    name_counts = _Counter(r["name1"] for r in result)
-    for r in result:
-        if name_counts[r["name1"]] > 1:
-            raw_street = r.get("streetname", "").strip()
-            clean = re.sub(r"(?i)^jalan\s+", "", raw_street).strip()
-            if clean:
-                r["name1"] = f"{r['name1']} {clean}"
-
-    return result
-
-
 def _read_unified_csv(path: Path) -> list[dict]:
     """
     Read the unified list_edc.csv and return rows in the same dict format
-    as read_batch_xlsx.  Required column: report_status (new|update|delete|realtime).
+    as the internal csv_row format.  Required column: report_status (new|update|delete|realtime).
     """
     import csv as _csv_mod
 
@@ -1175,109 +954,6 @@ def _read_unified_csv(path: Path) -> list[dict]:
                 r["name1"] = f"{r['name1']} {clean}"
 
     return result
-
-
-_DAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-
-
-def _schedule_to_text(sched: dict) -> str:
-    """Convert {weekday: (open_time, close_time)} back to operating-hours text."""
-    if not sched:
-        return ""
-    groups: dict = {}
-    for wd in range(7):
-        slot = sched.get(wd)
-        key  = (slot[0].strftime("%H:%M"), slot[1].strftime("%H:%M")) if (slot and slot[0] and slot[1]) else None
-        groups.setdefault(key, []).append(wd)
-
-    open_groups = {k: sorted(v) for k, v in groups.items() if k is not None}
-    if not open_groups:
-        return ""
-
-    parts = []
-    for (o, c), days in sorted(open_groups.items(), key=lambda x: x[1][0]):
-        if days == list(range(7)):
-            label = "Monday-Sunday"
-        elif days == list(range(5)):
-            label = "Monday-Friday"
-        elif days == [5, 6]:
-            label = "Saturday-Sunday"
-        elif days == list(range(days[0], days[-1] + 1)):
-            label = f"{_DAY_NAMES[days[0]]}-{_DAY_NAMES[days[-1]]}"
-        else:
-            label = "/".join(_DAY_NAMES[d] for d in days)
-        parts.append(f"{label}, {o}-{c}")
-    return "; ".join(parts)
-
-
-def _merge_inputs_to_unified_csv(output_path: Path) -> int:
-    """Read all input xlsx files and write a unified list_edc.csv. Returns rows written."""
-    import csv as _csv_mod
-
-    BT_MAP = {
-        "xlsx-new":      "new",
-        "xlsx-update":   "update",
-        "xlsx-delete":   "delete",
-        "xlsx-realtime": "realtime",
-    }
-    FIELDNAMES = [
-        "report_status", "id", "name", "latitude", "longitude",
-        "routing_lat", "routing_lon", "category", "operating_hours",
-        "phone", "mobile", "house_number", "street_name", "postal_code",
-        "admin2", "admin3", "admin4", "admin5", "closed_from",
-    ]
-
-    all_rows: list[dict] = []
-    for path, btype in [
-        (_BATCH_NEW_XLSX,  "new"),
-        (_BATCH_UPD_XLSX,  "update"),
-        (_BATCH_DEL_XLSX,  "delete"),
-        (_BATCH_DATA_XLSX, "5poi"),
-    ]:
-        if path.exists():
-            rows = read_batch_xlsx(path, btype)
-            all_rows.extend(rows)
-            print(f"      {path.name:<26}: {len(rows)} rows")
-        else:
-            print(f"      {path.name:<26}: not found — skipped")
-
-    if not all_rows:
-        print("      No rows to merge.")
-        return 0
-
-    written = 0
-    with open(output_path, "w", newline="", encoding="utf-8-sig") as f:
-        w = _csv_mod.DictWriter(f, fieldnames=FIELDNAMES)
-        w.writeheader()
-        for r in all_rows:
-            rs = BT_MAP.get(r.get("batch_type", ""))
-            if not rs:
-                continue
-            sched = r.get("_schedule_override")
-            w.writerow({
-                "report_status":   rs,
-                "id":              r.get("_xlsx_id", ""),
-                "name":            r.get("name1", ""),
-                "latitude":        r.get("displaylatitude", ""),
-                "longitude":       r.get("displaylongitude", ""),
-                "routing_lat":     r.get("routinglatitude", ""),
-                "routing_lon":     r.get("routinglongitude", ""),
-                "category":        r.get("primarycategorynm", ""),
-                "operating_hours": _schedule_to_text(sched) if sched else "",
-                "phone":           r.get("PHONE", ""),
-                "mobile":          r.get("MOBILE", ""),
-                "house_number":    r.get("hno", ""),
-                "street_name":     r.get("streetname", ""),
-                "postal_code":     r.get("postalcode", ""),
-                "admin2":          r.get("admin2", ""),
-                "admin3":          r.get("admin3", ""),
-                "admin4":          r.get("admin4", ""),
-                "admin5":          r.get("admin5", ""),
-                "closed_from":     r.get("closed_from", ""),
-            })
-            written += 1
-
-    return written
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -2939,37 +2615,16 @@ def _upload_to_gdrive(output_dir: Path) -> None:
 # MAIN
 # ──────────────────────────────────────────────────────────────────────────────
 
-_BATCH_NEW_XLSX    = INPUT_DIR / "list_new_edc.xlsx"
-_BATCH_UPD_XLSX    = INPUT_DIR / "list_update_edc.xlsx"
-_BATCH_DEL_XLSX    = INPUT_DIR / "list_delete_edc.xlsx"
-_BATCH_DATA_XLSX   = INPUT_DIR / "list_batch.xlsx"
 _BATCH_UNIFIED_CSV = INPUT_DIR / "list_edc.csv"
 _REALTIME_CSV      = INPUT_DIR / "list_realtime.csv"
 
 
 def _load_xlsx_supplement(csv_rows: list[dict]) -> int:
     """
-    Append batch xlsx rows to csv_rows in-place (for schedule lookup / batch tagging).
-    Returns the number of xlsx rows appended.
+    Append list_edc.csv rows to csv_rows in-place (for schedule lookup / batch tagging).
+    Returns the number of rows appended.
     """
     count = 0
-    if _BATCH_NEW_XLSX.exists():
-        rows = read_batch_xlsx(_BATCH_NEW_XLSX, "new")
-        csv_rows.extend(rows)
-        count += len(rows)
-    if _BATCH_UPD_XLSX.exists():
-        rows = read_batch_xlsx(_BATCH_UPD_XLSX, "update")
-        csv_rows.extend(rows)
-        count += len(rows)
-    if _BATCH_DEL_XLSX.exists():
-        rows = read_batch_xlsx(_BATCH_DEL_XLSX, "delete")
-        csv_rows.extend(rows)
-        count += len(rows)
-    if _BATCH_DATA_XLSX.exists():
-        rows_5poi = read_batch_xlsx(_BATCH_DATA_XLSX, "5poi")
-        non_realtime = [r for r in rows_5poi if r.get("batch_type") != "xlsx-realtime"]
-        csv_rows.extend(non_realtime)
-        count += len(non_realtime)
     if _BATCH_UNIFIED_CSV.exists():
         rows_u = _read_unified_csv(_BATCH_UNIFIED_CSV)
         non_rt = [r for r in rows_u if r.get("batch_type") != "xlsx-realtime"]
@@ -2992,7 +2647,6 @@ def main() -> None:
     add_merchants_mode   = "--add-merchants"   in sys.argv
     batch_seed_mode      = "--batch-seed"      in sys.argv
     upload_mode          = "--upload"          in sys.argv
-    merge_csv_mode       = "--merge-csv"       in sys.argv
 
     conn = get_connection()
 
@@ -3014,13 +2668,6 @@ def main() -> None:
         conn.close()
         return
 
-    if merge_csv_mode:
-        print(f"[merge-csv] Reading input xlsx files → {_BATCH_UNIFIED_CSV} ...")
-        n = _merge_inputs_to_unified_csv(_BATCH_UNIFIED_CSV)
-        print(f"[merge-csv] Done — {n} rows written to {_BATCH_UNIFIED_CSV}")
-        conn.close()
-        return
-
     # Auto-detect: if no explicit mode and DB already has data → append instead of wipe
     if not any([reset_mode, purge_mode, append_mode, report_mode, report_selected_mode,
                 prune_closed_mode, add_merchants_mode, batch_seed_mode]):
@@ -3029,9 +2676,7 @@ def main() -> None:
             if cur.fetchone()[0] > 0:
                 append_mode = True
 
-    if merge_csv_mode:
-        mode_label = "MERGE INPUTS → list_edc.csv"
-    elif report_selected_mode:
+    if report_selected_mode:
         mode_label = "REPORT SELECTED (input files only)"
     elif report_mode:
         mode_label = "REPORT ONLY"
@@ -3159,49 +2804,19 @@ def main() -> None:
         return
 
     if batch_seed_mode:
-        new_xlsx = _BATCH_NEW_XLSX
-        upd_xlsx = _BATCH_UPD_XLSX
-
-        print("[1/7] Reading batch xlsx files...")
+        print("[1/7] Reading list_edc.csv...")
         batch_rows: list[dict] = []
-        del_rows:   list[dict] = []
-        if new_xlsx.exists():
-            nr = read_batch_xlsx(new_xlsx, "new")
-            print(f"      list_new_edc.xlsx   : {len(nr)} rows")
-            batch_rows.extend(nr)
-        else:
-            print(f"      list_new_edc.xlsx   : not found — skipped")
-        if upd_xlsx.exists():
-            ur = read_batch_xlsx(upd_xlsx, "update")
-            print(f"      list_update_edc.xlsx: {len(ur)} rows")
-            batch_rows.extend(ur)
-        else:
-            print(f"      list_update_edc.xlsx: not found — skipped")
-        if _BATCH_DEL_XLSX.exists():
-            del_rows = read_batch_xlsx(_BATCH_DEL_XLSX, "delete")
-            print(f"      list_delete_edc.xlsx: {len(del_rows)} rows")
-            batch_rows.extend(del_rows)
-        else:
-            print(f"      list_delete_edc.xlsx: not found — skipped")
-        rt_rows: list[dict] = []
-        if _BATCH_DATA_XLSX.exists():
-            all_5poi = read_batch_xlsx(_BATCH_DATA_XLSX, "5poi")
-            _rt      = [r for r in all_5poi if r.get("batch_type") == "xlsx-realtime"]
-            new_5poi = [r for r in all_5poi if r.get("batch_type") != "xlsx-realtime"]
-            print(f"      list_batch.xlsx     : {len(new_5poi)} new POI, {len(_rt)} realtime")
-            batch_rows.extend(new_5poi)
-            rt_rows.extend(_rt)
-        else:
-            print(f"      list_batch.xlsx     : not found — skipped")
+        rt_rows:    list[dict] = []
         if _BATCH_UNIFIED_CSV.exists():
             rows_u     = _read_unified_csv(_BATCH_UNIFIED_CSV)
-            rt_rows_u  = [r for r in rows_u if r.get("batch_type") == "xlsx-realtime"]
-            new_rows_u = [r for r in rows_u if r.get("batch_type") != "xlsx-realtime"]
-            print(f"      list_edc.csv        : {len(new_rows_u)} batch, {len(rt_rows_u)} realtime")
-            batch_rows.extend(new_rows_u)
-            rt_rows.extend(rt_rows_u)
+            rt_rows    = [r for r in rows_u if r.get("batch_type") == "xlsx-realtime"]
+            batch_rows = [r for r in rows_u if r.get("batch_type") != "xlsx-realtime"]
+            del_rows   = [r for r in batch_rows if r.get("batch_type") == "xlsx-delete"]
+            print(f"      list_edc.csv : {len(batch_rows)} batch rows, {len(rt_rows)} realtime")
         else:
-            print(f"      list_edc.csv        : not found — skipped")
+            print(f"      list_edc.csv : not found — nothing to do.")
+            conn.close()
+            return
         if rt_rows:
             import csv as _csv_mod
             with open(_REALTIME_CSV, "w", newline="", encoding="utf-8") as _rtf:
