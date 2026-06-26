@@ -231,8 +231,7 @@ def _read_unified_csv(path: Path) -> list[dict]:
 
                 closed_from_str = ""
                 if status == "delete":
-                    cf_raw = _g("closed_from")
-                    closed_from_str = cf_raw[:10] if cf_raw else ""
+                    closed_from_str = _parse_closed_from(_g("closed_from"))
 
                 last_signal_str = ""
                 batch_type_tag  = f"xlsx-{status}"
@@ -319,6 +318,32 @@ def _format_ago(hours_ago: float) -> str:
     if hours_ago < 24 * 365:
         return f"{hours_ago / 24:.0f}d ago"
     return f"{hours_ago / (24 * 365.25):.1f}yr ago"
+
+
+def _parse_closed_from(raw: str) -> str:
+    """
+    Normalize a closed_from string to ISO date format.
+    Handles:
+      - ISO dates ("2025-03-15")         → returned as-is
+      - Quarter format ("2025 q1", "2024 Q3") → random date in that quarter
+      - Empty string                      → ""
+      - Unrecognized format               → ""
+    """
+    raw = raw.strip()
+    if not raw:
+        return ""
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw):
+        return raw
+    m = re.fullmatch(r"(\d{4})\s*[qQ]([1-4])", raw)
+    if m:
+        year = int(m.group(1))
+        q    = int(m.group(2))
+        _starts = {1: (1, 1), 2: (4, 1), 3: (7, 1), 4: (10, 1)}
+        _ends   = {1: (3, 31), 2: (6, 30), 3: (9, 30), 4: (12, 31)}
+        start = date(year, *_starts[q])
+        end   = date(year, *_ends[q])
+        return (start + timedelta(days=random.randint(0, (end - start).days))).isoformat()
+    return ""
 
 
 def _load_font(size: int):

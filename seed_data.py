@@ -53,6 +53,112 @@ def reset_database(conn) -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# SCHEMA MIGRATION HELPERS
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _ensure_merchant_columns(conn) -> None:
+    """Add reference and merchant_status columns to merchants if not already present."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            ALTER TABLE merchants
+                ADD COLUMN IF NOT EXISTS reference       VARCHAR(255),
+                ADD COLUMN IF NOT EXISTS merchant_status VARCHAR(20) DEFAULT 'ACTIVE'
+        """)
+    conn.commit()
+
+
+def _sync_merchant_data(conn) -> None:
+    """
+    For all 'delete' rows in list_edc.csv:
+      1. Normalize closed_from (quarter format or empty → random ISO date).
+      2. Write updated values back to the CSV.
+      3. In DB: set merchant_status = 'INACTIVE' for matched merchants if not already.
+    Also updates the reference column for all merchants that have a CSV id.
+    """
+    import csv as _csv_mod
+
+    csv_path = _BATCH_UNIFIED_CSV
+    if not csv_path.exists():
+        return
+
+    with open(csv_path, newline="", encoding="utf-8-sig") as f:
+        reader    = _csv_mod.DictReader(f)
+        fieldnames = reader.fieldnames or []
+        rows      = list(reader)
+
+    csv_changed = 0
+    for row in rows:
+        if row.get("report_status", "").lower() != "delete":
+            continue
+        original = row.get("closed_from", "").strip()
+        parsed   = _parse_closed_from(original)
+        if not parsed:
+            # No date at all — generate a random date in the past year
+            _end   = date.today()
+            _start = _end - timedelta(days=365)
+            parsed = (_start + timedelta(days=random.randint(0, (_end - _start).days))).isoformat()
+        if parsed != original:
+            row["closed_from"] = parsed
+            csv_changed += 1
+
+    if csv_changed:
+        with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
+            w = _csv_mod.DictWriter(f, fieldnames=fieldnames)
+            w.writeheader()
+            w.writerows(rows)
+        print(f"      [sync] Normalised {csv_changed} closed_from date(s) in {csv_path.name}")
+
+    # Build name→(id, closed_from) lookup for all rows that have an id
+    ref_map: dict[str, str] = {}
+    inactive_names: set[str] = set()
+    for row in rows:
+        name = row.get("name", "").strip()
+        if not name:
+            continue
+        csv_id = row.get("id", "").strip()
+        if csv_id:
+            ref_map[name] = csv_id
+        if row.get("report_status", "").lower() == "delete" and row.get("closed_from", "").strip():
+            inactive_names.add(name)
+
+    if not ref_map and not inactive_names:
+        return
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT merchant_name, merchant_id FROM merchants")
+        db_map = {n: mid for n, mid in cur.fetchall()}
+
+    updated_ref = updated_status = 0
+    with conn.cursor() as cur:
+        for name, csv_id in ref_map.items():
+            m_id = db_map.get(name)
+            if m_id is None:
+                continue
+            cur.execute(
+                "UPDATE merchants SET reference = %s WHERE merchant_id = %s AND (reference IS NULL OR reference != %s)",
+                (csv_id, m_id, csv_id),
+            )
+            updated_ref += cur.rowcount
+
+        for name in inactive_names:
+            m_id = db_map.get(name)
+            if m_id is None:
+                continue
+            cur.execute(
+                "UPDATE merchants SET merchant_status = 'INACTIVE' "
+                "WHERE merchant_id = %s AND (merchant_status IS NULL OR merchant_status != 'INACTIVE')",
+                (m_id,),
+            )
+            updated_status += cur.rowcount
+
+    conn.commit()
+    if updated_ref:
+        print(f"      [sync] Updated reference for {updated_ref} merchant(s)")
+    if updated_status:
+        print(f"      [sync] Marked {updated_status} merchant(s) as INACTIVE")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # LOAD STATIC REFERENCE DATA
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -209,6 +315,7 @@ def insert_merchants_and_terminals(
         # Denormalised display city: prefer City level, fall back to Province
         city = admin_tuple[1] or admin_tuple[0] or "Jakarta"
 
+        reference = row.get("_xlsx_id", "") or None
         merchant_insert_rows.append((
             row.get("name1", f"Merchant {idx+1}").strip(),
             merchant_code,
@@ -219,6 +326,7 @@ def insert_merchants_and_terminals(
             latitude,
             longitude,
             acquirer_id,
+            reference,
         ))
 
         sched_override = row.get("_schedule_override")
@@ -249,7 +357,7 @@ def insert_merchants_and_terminals(
             """
             INSERT INTO merchants
                 (merchant_name, merchant_code, mcc_code, address, city,
-                 admin_area_id, latitude, longitude, acquirer_id)
+                 admin_area_id, latitude, longitude, acquirer_id, reference)
             VALUES %s
             RETURNING merchant_id, merchant_code
             """,
@@ -1751,6 +1859,11 @@ def main() -> None:
     print(f"  CSV        : {CSV_PATH}")
     print(f"  Database   : {DB_CONFIG['dbname']}@{DB_CONFIG['host']}:{DB_CONFIG['port']}")
     print("=" * 60)
+
+    _ensure_merchant_columns(conn)
+
+    if report_mode or report_selected_mode or append_mode or batch_seed_mode:
+        _sync_merchant_data(conn)
 
     if prune_closed_mode:
         print("[1/3] Loading CSV for closure dates...")
