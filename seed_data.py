@@ -1962,6 +1962,7 @@ def main() -> None:
                 SELECT m.merchant_id FROM merchants m
                 LEFT JOIN transactions t ON t.merchant_id = m.merchant_id
                 WHERE t.merchant_id IS NULL
+                  AND (m.merchant_status IS NULL OR m.merchant_status = 'ACTIVE')
             """)
             _empty_ids = {r[0] for r in cur.fetchall()}
         if _empty_ids:
