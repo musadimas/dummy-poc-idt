@@ -11,7 +11,8 @@ poc-edc/
 ├── seed_data.py                  # Seeder utama — generate transaksi dari data POI
 ├── schema.sql                    # DDL — semua tabel, indeks, view, data referensi
 ├── queries.sql                   # Query SQL analitik dengan filter rentang tanggal
-├── input/
+├── input/                        # ← buat folder ini, letakkan semua file input di sini
+│   ├── poc_edc.zip               # SQL dump lengkap — restore untuk skip seeding
 │   ├── poi_edc.csv               # Data POI utama (merchant aktif)
 │   ├── list_new_edc.xlsx         # Merchant baru untuk di-insert ke DB
 │   ├── list_update_edc.xlsx      # Merchant yang datanya diperbarui
@@ -42,6 +43,43 @@ pip install psycopg2-binary Pillow openpyxl
 ---
 
 ## Setup Awal
+
+### 1. Buat folder `input/` dan tempatkan file input
+
+```bash
+mkdir input
+```
+
+Salin semua file input (`poi_edc.csv`, `list_*.xlsx`, `poc_edc.zip`, dll.) ke dalam folder `input/`.
+
+---
+
+### Opsi A — Restore dari SQL Dump *(lebih cepat, skip seeding)*
+
+File `input/poc_edc.zip` berisi SQL dump lengkap database yang sudah terisi data transaksi. Gunakan ini untuk langsung mendapatkan data tanpa perlu menjalankan seeder dari awal.
+
+```bash
+# Ekstrak dump dari zip
+unzip input/poc_edc.zip -d input/
+
+# Buat database
+PGPASSWORD=Manualbrew1 psql -U postgres -c "CREATE DATABASE edtransmap;"
+
+# Restore dump
+PGPASSWORD=Manualbrew1 psql -U postgres -d edtransmap -f input/poc_edc.sql
+# atau jika format custom:
+# PGPASSWORD=Manualbrew1 pg_restore -U postgres -d edtransmap input/poc_edc.dump
+```
+
+Setelah restore selesai, langsung jalankan laporan:
+
+```bash
+python seed_data.py --report
+```
+
+---
+
+### Opsi B — Setup dari Nol *(seed penuh)*
 
 ### 1. Buat database dan terapkan skema
 
