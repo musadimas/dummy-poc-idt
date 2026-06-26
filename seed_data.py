@@ -2769,14 +2769,15 @@ def main() -> None:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-    purge_mode        = "--purge"          in sys.argv
-    report_mode       = "--report"         in sys.argv
-    prune_closed_mode = "--prune-closed"   in sys.argv
-    append_mode       = "--append"         in sys.argv
-    reset_mode        = "--reset"          in sys.argv
-    add_merchants_mode = "--add-merchants" in sys.argv
-    batch_seed_mode   = "--batch-seed"     in sys.argv
-    upload_mode       = "--upload"         in sys.argv
+    purge_mode           = "--purge"           in sys.argv
+    report_mode          = "--report"          in sys.argv
+    report_selected_mode = "--report-selected" in sys.argv
+    prune_closed_mode    = "--prune-closed"    in sys.argv
+    append_mode          = "--append"          in sys.argv
+    reset_mode           = "--reset"           in sys.argv
+    add_merchants_mode   = "--add-merchants"   in sys.argv
+    batch_seed_mode      = "--batch-seed"      in sys.argv
+    upload_mode          = "--upload"          in sys.argv
 
     conn = get_connection()
 
@@ -2799,14 +2800,16 @@ def main() -> None:
         return
 
     # Auto-detect: if no explicit mode and DB already has data → append instead of wipe
-    if not any([reset_mode, purge_mode, append_mode, report_mode,
+    if not any([reset_mode, purge_mode, append_mode, report_mode, report_selected_mode,
                 prune_closed_mode, add_merchants_mode, batch_seed_mode]):
         with conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM transactions")
             if cur.fetchone()[0] > 0:
                 append_mode = True
 
-    if report_mode:
+    if report_selected_mode:
+        mode_label = "REPORT SELECTED (input files only)"
+    elif report_mode:
         mode_label = "REPORT ONLY"
     elif purge_mode:
         mode_label = "PURGE DATE RANGE then re-seed"
@@ -2908,6 +2911,25 @@ def main() -> None:
         print(f"      {len(merchants_info)} merchants loaded.")
 
         print("\nGenerating merchant activity report...")
+        generate_merchant_status_report(conn, merchants_info)
+        conn.close()
+        return
+
+    if report_selected_mode:
+        # Same as --report but restricted to merchants present in the input files
+        print("[1/2] Loading CSV + batch xlsx for schedule data...")
+        with open(CSV_PATH, encoding="utf-8-sig", newline="") as f:
+            csv_rows = [r for r in csv.DictReader(f) if r.get("status", "").strip() == "ACTIVE"]
+        _n_xlsx = _load_xlsx_supplement(csv_rows)
+        print(f"      {len(csv_rows) - _n_xlsx} CSV POIs + {_n_xlsx} xlsx rows loaded.")
+
+        print("[2/2] Loading merchants from DB...")
+        merchants_info = load_merchants_from_db(conn, csv_rows)
+        input_names = {r.get("name1", "").strip() for r in csv_rows if r.get("name1", "").strip()}
+        merchants_info = [m for m in merchants_info if m["merchant_name"] in input_names]
+        print(f"      {len(merchants_info)} merchants matched to input files.")
+
+        print("\nGenerating merchant activity report (selected)...")
         generate_merchant_status_report(conn, merchants_info)
         conn.close()
         return
