@@ -124,7 +124,7 @@ def _sync_merchant_data(conn) -> None:
         parsed_rt = _read_unified_csv(csv_path)
         parsed_rt = [r for r in parsed_rt if r.get("batch_type") == "xlsx-realtime"]
         with open(REALTIME_CSV, "w", newline="", encoding="utf-8") as _rtf:
-            _w = _csv_mod.DictWriter(_rtf, fieldnames=["id", "poi_nm", "last_signal", "category", "street"])
+            _w = _csv_mod.DictWriter(_rtf, fieldnames=["id", "poi_nm", "last_signal", "category", "street", "lat", "lon"])
             _w.writeheader()
             for _r in parsed_rt:
                 _w.writerow({
@@ -133,6 +133,8 @@ def _sync_merchant_data(conn) -> None:
                     "last_signal": _r.get("last_signal", ""),
                     "category":    _r.get("primarycategorynm", ""),
                     "street":      _r.get("streetname", ""),
+                    "lat":         _r.get("displaylatitude", ""),
+                    "lon":         _r.get("displaylongitude", ""),
                 })
         print(f"      [sync] Refreshed list_realtime.csv ({len(parsed_rt)} rows)")
 
@@ -888,7 +890,8 @@ def load_merchants_from_db(conn, csv_rows: list[dict]) -> list[dict]:
         cur.execute("""
             SELECT m.merchant_id, m.merchant_name, m.merchant_code, m.mcc_code,
                    t.terminal_id, t.terminal_code, t.serial_number, t.model,
-                   m.reference, m.closed_at
+                   m.reference, m.closed_at,
+                   m.latitude, m.longitude
             FROM   merchants m
             JOIN   terminals t ON t.merchant_id = m.merchant_id
         """)
@@ -898,7 +901,7 @@ def load_merchants_from_db(conn, csv_rows: list[dict]) -> list[dict]:
     _mcc_to_cat = {v: k for k, v in CATEGORY_TO_MCC.items()}
 
     result = []
-    for merchant_id, merchant_name, merchant_code, mcc_code, terminal_id, terminal_code, serial_number, model, reference, closed_at in db_rows:
+    for merchant_id, merchant_name, merchant_code, mcc_code, terminal_id, terminal_code, serial_number, model, reference, closed_at, latitude, longitude in db_rows:
         sched = csv_schedule.get(merchant_name)
         if sched is None:
             # Batch xlsx merchant not in csv_rows — build default schedule from MCC
@@ -921,6 +924,8 @@ def load_merchants_from_db(conn, csv_rows: list[dict]) -> list[dict]:
             "model":         model,
             "reference":     reference,
             "closed_at":     closed_at,
+            "latitude":      latitude,
+            "longitude":     longitude,
             "category":      sched.get("category", ""),
             "schedule":      sched.get("schedule", {}),
             "closed_from":   sched.get("closed_from"),
@@ -1109,6 +1114,8 @@ def _save_card_jpeg(
     output_dir: Path,
     seq: int,
     xlsx_id: str = "",
+    lat: float | None = None,
+    lon: float | None = None,
 ) -> "Path | None":
     """Render a styled JPEG activity card for one merchant. Returns the saved path."""
     try:
@@ -1123,7 +1130,8 @@ def _save_card_jpeg(
     status_colour = _C_ACTIVE if status == "ACTIVE" else _C_INACTIVE
 
     # ── compute card height dynamically ───────────────────────────────────────
-    n_lines  = 6                     # name + 5 data rows
+    _has_coords = lat is not None and lon is not None
+    n_lines  = 6 + (1 if _has_coords else 0)   # name + 5 data rows (+ coords)
     n_reason = len(reasons)
     height   = _PAD + _LH + 6 + _LH + (_LH * n_lines) + 10 + (_LH * n_reason) + _PAD + 20
 
@@ -1155,6 +1163,8 @@ def _save_card_jpeg(
     row("24h / 7d / 30d", f"{c24h}  /  {c7d}  /  {c30d}")
     row("channel split", f"QRIS {qris_30d}   |   EDC {edc_30d}")
     row("active days",   f"{active_days}/{window_days}  (ratio {activity_ratio}, max gap {max_gap}d)")
+    if _has_coords:
+        row("txn coord",      f"{lat}, {lon}")
 
     if reasons:
         y += 4
@@ -1190,6 +1200,8 @@ def _save_realtime_card_jpeg(
     output_dir: Path,
     seq: int,
     xlsx_id: str = "",
+    lat: float | None = None,
+    lon: float | None = None,
 ) -> "Path | None":
     """Render a simplified signal-only card for realtime (ATM/bank) POIs."""
     try:
@@ -1202,8 +1214,9 @@ def _save_realtime_card_jpeg(
     font_lg = _load_font(18)
     status_colour = _C_ACTIVE if status == "ACTIVE" else _C_INACTIVE
 
+    _has_coords = lat is not None and lon is not None
     n_reason = len(reasons)
-    height = _PAD + _LH + 6 + _LH + (_LH * 2) + 10 + (_LH * n_reason) + _PAD + 20
+    height = _PAD + _LH + 6 + _LH + (_LH * (2 + (1 if _has_coords else 0))) + 10 + (_LH * n_reason) + _PAD + 20
 
     img  = Image.new("RGB", (_CARD_W, max(height, 180)), _C_BG)
     draw = ImageDraw.Draw(img)
@@ -1223,6 +1236,8 @@ def _save_realtime_card_jpeg(
 
     _row("STATUS",      status, status_colour)
     _row("last_signal", f"{last_signal_fmt}  ({ago_str})")
+    if _has_coords:
+        _row("txn coord",   f"{lat}, {lon}")
 
     if reasons:
         y += 4
@@ -1451,6 +1466,11 @@ def _generate_realtime_records(output_dir: Path, seq_start: int, now_wib) -> "tu
             name      = f"{raw_name.upper()} {clean_st}".strip() if clean_st else raw_name.upper()
             xlsx_id   = row.get("id", "")
             sig_raw   = (row.get("last_signal") or "").strip()
+            try:
+                rt_lat = float(row.get("lat") or "")
+                rt_lon = float(row.get("lon") or "")
+            except ValueError:
+                rt_lat = rt_lon = None
 
             sig_dt = None
             for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
@@ -1479,6 +1499,7 @@ def _generate_realtime_records(output_dir: Path, seq_start: int, now_wib) -> "tu
                 reasons=reasons, now_wib=now_wib,
                 output_dir=output_dir, seq=seq,
                 xlsx_id=xlsx_id,
+                lat=rt_lat, lon=rt_lon,
             )
             records.append((seq, name, f"{sig_fmt}  ({ago_str})", jpeg_path, xlsx_id))
             seq += 1
@@ -1557,6 +1578,7 @@ def generate_merchant_status_report(conn, merchants_info: list[dict]) -> None:
                         reasons=[f"last txn {ago_s}"],
                         now_wib=now_wib, output_dir=output_dir, seq=seq,
                         xlsx_id=xlsx_id,
+                        lat=info.get("latitude"), lon=info.get("longitude"),
                     )
                     excel_records.append((seq, m_name, f"{ltf}  ({ago_s})", jpeg_path))
                     if bt in ("xlsx-new", "xlsx-update", "xlsx-delete"):
@@ -1576,6 +1598,7 @@ def generate_merchant_status_report(conn, merchants_info: list[dict]) -> None:
                             reasons=["no transaction data found"],
                             now_wib=now_wib, output_dir=output_dir, seq=seq,
                             xlsx_id=xlsx_id,
+                            lat=info.get("latitude"), lon=info.get("longitude"),
                         )
                         excel_records.append((seq, m_name, "—  (no data)", jpeg_path))
                         batch_records.append((seq, m_name, "—  (no data)", jpeg_path, bt, xlsx_id))
@@ -1686,6 +1709,7 @@ def generate_merchant_status_report(conn, merchants_info: list[dict]) -> None:
                 output_dir=output_dir,
                 seq=seq,
                 xlsx_id=xlsx_id,
+                lat=info.get("latitude"), lon=info.get("longitude"),
             )
             excel_records.append((seq, m_name, f"{last_txn_fmt}  ({ago_str})", jpeg_path))
             if bt in ("xlsx-new", "xlsx-update", "xlsx-delete"):
