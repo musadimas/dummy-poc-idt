@@ -1164,7 +1164,7 @@ def _save_card_jpeg(
     row("channel split", f"QRIS {qris_30d}   |   EDC {edc_30d}")
     row("active days",   f"{active_days}/{window_days}  (ratio {activity_ratio}, max gap {max_gap}d)")
     if _has_coords:
-        row("coordinates",   f"{lat:.6f}, {lon:.6f}")
+        row("txn coord",      f"{lat}, {lon}")
 
     if reasons:
         y += 4
@@ -1237,7 +1237,7 @@ def _save_realtime_card_jpeg(
     _row("STATUS",      status, status_colour)
     _row("last_signal", f"{last_signal_fmt}  ({ago_str})")
     if _has_coords:
-        _row("coordinates", f"{lat:.6f}, {lon:.6f}")
+        _row("txn coord",   f"{lat}, {lon}")
 
     if reasons:
         y += 4
