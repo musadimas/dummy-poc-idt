@@ -16,7 +16,7 @@ DB_CONFIG = {
     "port":     int(os.getenv("PG_PORT", "5432")),
     "dbname":   os.getenv("PG_DB",       "edtransmap"),
     "user":     os.getenv("PG_USER",     "postgres"),
-    "password": os.getenv("PG_PASSWORD", "Manualbrew1"),
+    "password": os.getenv("PG_PASSWORD", "postgres"),
 }
 
 INPUT_DIR  = Path(__file__).parent / "input"

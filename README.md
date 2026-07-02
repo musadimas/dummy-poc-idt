@@ -121,7 +121,7 @@ Semua konstanta ada di `config.py`. Override koneksi DB via environment variable
 | `PG_PORT`     | `5432`        | Port PostgreSQL |
 | `PG_DB`       | `edtransmap`  | Nama database   |
 | `PG_USER`     | `postgres`    | Username        |
-| `PG_PASSWORD` | `Manualbrew1` | Password        |
+| `PG_PASSWORD` | `postgres` | Password        |
 
 **Rentang tanggal** — ubah dua baris ini di `config.py`:
 

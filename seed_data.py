@@ -860,87 +860,161 @@ def _upsert_settlement(
 
 def load_merchants_from_db(conn, csv_rows: list[dict]) -> list[dict]:
     """
-    Re-build the merchants_info list from existing DB rows + CSV schedule data.
-    Matches by merchant_name so the correct operating hours are applied.
+    Re-build merchants_info from existing DB rows + CSV schedule data.
+
+    Main matching rule:
+        CSV id / _xlsx_id / supplier_poiid / ID / placeid
+        ==
+        DB merchants.reference
+
+    Merchant name is not used for matching because DB merchant_name can be extended
+    and merchant names can duplicate.
     """
-    # Build a name → (category, schedule) lookup from the CSV
+
+    def norm(value) -> str:
+        return str(value or "").strip()
+
+    def get_csv_reference(row: dict) -> str:
+        return (
+            norm(row.get("_xlsx_id"))
+            or norm(row.get("supplier_poiid"))
+            or norm(row.get("ID"))
+            or norm(row.get("id"))
+            or norm(row.get("placeid"))
+        )
+
     csv_schedule: dict[str, dict] = {}
+
     for row in csv_rows:
-        name     = row.get("name1", "").strip()
-        category = row.get("primarycategorynm", "").strip()
-        if not name:
+        name = norm(row.get("name1"))
+        csv_ref = get_csv_reference(row)
+
+        print(f"      [sync] Loading schedule for merchant: {name or '<unnamed>'}")
+
+        if not csv_ref:
             continue
+
+        category = norm(row.get("primarycategorynm"))
+
         sched_override = row.get("_schedule_override")
-        schedule = sched_override if sched_override else {wd: resolve_hours(row, wd, category) for wd in range(7)}
+        schedule = (
+            sched_override
+            if sched_override
+            else {wd: resolve_hours(row, wd, category) for wd in range(7)}
+        )
+
         cf_raw = row.get("closed_from", "")
         cf_str = cf_raw.strip() if isinstance(cf_raw, str) else ""
-        bt      = row.get("batch_type", "").strip()
-        xlsx_id = (row.get("_xlsx_id", "") or row.get("supplier_poiid", "")
-                   or row.get("ID", "") or row.get("id", "")
-                   or row.get("placeid", ""))
-        csv_schedule[name] = {
-            "category":    category,
-            "schedule":    schedule,
+
+        batch_type = norm(row.get("batch_type"))
+
+        csv_schedule[csv_ref] = {
+            "category": category,
+            "schedule": schedule,
             "closed_from": date.fromisoformat(cf_str) if cf_str else None,
-            "batch_type":  bt if bt else None,
-            "_xlsx_id":    xlsx_id if xlsx_id else None,
+            "batch_type": batch_type if batch_type else None,
+            "_xlsx_id": csv_ref,
+            "csv_name": name,
         }
 
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT m.merchant_id, m.merchant_name, m.merchant_code, m.mcc_code,
-                   t.terminal_id, t.terminal_code, t.serial_number, t.model,
-                   m.reference, m.closed_at,
-                   m.latitude, m.longitude
-            FROM   merchants m
-            JOIN   terminals t ON t.merchant_id = m.merchant_id
+            SELECT m.merchant_id,
+                   m.merchant_name,
+                   m.merchant_code,
+                   m.mcc_code,
+                   t.terminal_id,
+                   t.terminal_code,
+                   t.serial_number,
+                   t.model,
+                   m.reference,
+                   m.closed_at,
+                   m.latitude,
+                   m.longitude
+            FROM merchants m
+            JOIN terminals t ON t.merchant_id = m.merchant_id
         """)
         db_rows = cur.fetchall()
 
-    # Reverse MCC lookup for fallback schedule when merchant isn't in csv_rows
     _mcc_to_cat = {v: k for k, v in CATEGORY_TO_MCC.items()}
 
     result = []
-    for merchant_id, merchant_name, merchant_code, mcc_code, terminal_id, terminal_code, serial_number, model, reference, closed_at, latitude, longitude in db_rows:
-        sched = csv_schedule.get(merchant_name)
+
+    for (
+        merchant_id,
+        merchant_name,
+        merchant_code,
+        mcc_code,
+        terminal_id,
+        terminal_code,
+        serial_number,
+        model,
+        reference,
+        closed_at,
+        latitude,
+        longitude,
+    ) in db_rows:
+
+        ref_key = norm(reference)
+
+        # Main match: DB reference == CSV id
+        sched = csv_schedule.get(ref_key)
+
         if sched is None:
-            # Batch xlsx merchant not in csv_rows — build default schedule from MCC
-            cat         = _mcc_to_cat.get(mcc_code, "")
+            cat = _mcc_to_cat.get(mcc_code, "")
             default_hrs = CATEGORY_DEFAULT_HOURS.get(cat)
+
             sched = {
-                "category":    cat,
-                "schedule":    {wd: default_hrs for wd in range(7)},
+                "category": cat,
+                "schedule": {wd: default_hrs for wd in range(7)},
                 "closed_from": None,
-                "batch_type":  None,
+                "batch_type": None,
+                "_xlsx_id": None,
             }
+
         result.append({
-            "merchant_id":   merchant_id,
+            "merchant_id": merchant_id,
             "merchant_name": merchant_name,
             "merchant_code": merchant_code,
-            "mcc_code":      mcc_code,
-            "terminal_id":   terminal_id,
+            "mcc_code": mcc_code,
+            "terminal_id": terminal_id,
             "terminal_code": terminal_code,
             "serial_number": serial_number,
-            "model":         model,
-            "reference":     reference,
-            "closed_at":     closed_at,
-            "latitude":      latitude,
-            "longitude":     longitude,
-            "category":      sched.get("category", ""),
-            "schedule":      sched.get("schedule", {}),
-            "closed_from":   sched.get("closed_from"),
-            "batch_type":    sched.get("batch_type"),
-            "_xlsx_id":      sched.get("_xlsx_id"),
+            "model": model,
+            "reference": reference,
+            "closed_at": closed_at,
+            "latitude": latitude,
+            "longitude": longitude,
+            "category": sched.get("category", ""),
+            "schedule": sched.get("schedule", {}),
+            "closed_from": sched.get("closed_from"),
+            "batch_type": sched.get("batch_type"),
+            "_xlsx_id": sched.get("_xlsx_id"),
         })
+
     return result
 
-
 def filter_new_csv_rows(conn, csv_rows: list[dict]) -> list[dict]:
-    """Return only rows whose name1 is not already in the merchants table."""
+    """Return only rows whose CSV id is not already in merchants.reference."""
     with conn.cursor() as cur:
-        cur.execute("SELECT merchant_name FROM merchants")
-        existing = {r[0] for r in cur.fetchall()}
-    return [r for r in csv_rows if r.get("name1", "").strip() not in existing]
+        cur.execute("""
+            SELECT reference
+            FROM merchants
+            WHERE reference IS NOT NULL
+        """)
+        rows = cur.fetchall()
+
+    existing_references = {
+        str(reference).strip()
+        for (reference,) in rows
+        if str(reference).strip()
+    }
+
+    return [
+        r for r in csv_rows
+        if str(r.get("id", "")).strip()
+        and str(r.get("id", "")).strip() not in existing_references
+    ]
 
 
 def get_merchant_idx_offset(conn) -> int:
@@ -1178,7 +1252,6 @@ def _save_card_jpeg(
     y += 6
     footer = f"Generated {now_wib.strftime('%Y-%m-%dT%H:%M:%S%z')}"
     draw.text((_PAD, y), footer, font=font_sm, fill=_C_BORDER)
-
     # save — use xlsx_id for filename when available
     if xlsx_id:
         safe_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in xlsx_id)
@@ -1187,6 +1260,7 @@ def _save_card_jpeg(
         safe_name = "".join(c if c.isalnum() or c in " -_" else "_" for c in merchant_name)
         fname = output_dir / f"{seq:02d}_{safe_name[:40].strip()}.jpg"
     img.save(fname, "JPEG", quality=92)
+    print(f"      Saved card JPEG for '{merchant_name}' {fname} ({status})")
     return fname
 
 
@@ -1305,6 +1379,7 @@ def _save_excel_report(
     MID = Alignment(vertical="center", wrap_text=True)
 
     for row_idx, (seq_n, name, last_signal, jpeg_path) in enumerate(records, start=2):
+        print(f"      [excel] row {row_idx-1}: {name} ({last_signal})")
         ws.row_dimensions[row_idx].height = ROW_H
         ws.cell(row=row_idx, column=1, value=seq_n).alignment    = CTR
         ws.cell(row=row_idx, column=2, value=name).alignment     = MID
@@ -1357,6 +1432,8 @@ def _save_batch_excel_report(
         CTR = Alignment(horizontal="center", vertical="center")
         MID = Alignment(vertical="center", wrap_text=True)
         for row_idx, (seq_n, name, last_signal, jpeg_path, xlsx_id) in enumerate(records, start=2):
+            print(f"      [excel] {sheet_title} row {row_idx-1}: {name} ({last_signal})")
+
             ws.row_dimensions[row_idx].height = ROW_H
             ws.cell(row=row_idx, column=1, value=seq_n).alignment    = CTR
             ws.cell(row=row_idx, column=2, value=xlsx_id).alignment  = MID
@@ -1544,7 +1621,7 @@ def generate_merchant_status_report(conn, merchants_info: list[dict]) -> None:
 
     with conn.cursor() as cur:
         for info in merchants_info:
-
+            print(f"\n{'─'*62}\n{info['merchant_name']} batch {info['batch_type']} reference {info.get('reference', '')} (ID {info.get('merchant_id', '')})")
             m_id   = info["merchant_id"]
             m_name = info["merchant_name"]
 
@@ -1568,7 +1645,7 @@ def generate_merchant_status_report(conn, merchants_info: list[dict]) -> None:
                     print(f"STATUS        : {'INACTIVE':<10} (permanently closed)")
                     print(f"last_txn      : {ltf}  ({ago_s})")
                     bt      = info.get("batch_type")
-                    xlsx_id = info.get("_xlsx_id") or ""
+                    xlsx_id = info.get("_xlsx_id") or info.get("id") or ""
                     jpeg_path = _save_card_jpeg(
                         merchant_name=m_name, status="INACTIVE", confidence=0.0,
                         last_txn_fmt=ltf, ago_str=ago_s,
@@ -1587,7 +1664,7 @@ def generate_merchant_status_report(conn, merchants_info: list[dict]) -> None:
                 else:
                     print("STATUS        : NO DATA")
                     bt      = info.get("batch_type")
-                    xlsx_id = info.get("_xlsx_id") or ""
+                    xlsx_id = info.get("_xlsx_id") or info.get("id") or ""
                     if bt in ("xlsx-new", "xlsx-update", "xlsx-delete"):
                         jpeg_path = _save_card_jpeg(
                             merchant_name=m_name, status="INACTIVE", confidence=0.0,
@@ -1693,7 +1770,8 @@ def generate_merchant_status_report(conn, merchants_info: list[dict]) -> None:
 
             # ── save JPEG card ─────────────────────────────────────────────
             bt      = info.get("batch_type")
-            xlsx_id = info.get("_xlsx_id") or ""
+            xlsx_id = info.get("_xlsx_id") or info.get("id") or ""
+
             jpeg_path = _save_card_jpeg(
                 merchant_name=m_name,
                 status=status,
@@ -1716,11 +1794,14 @@ def generate_merchant_status_report(conn, merchants_info: list[dict]) -> None:
                 batch_records.append((seq, m_name, f"{last_txn_fmt}  ({ago_str})", jpeg_path, bt, xlsx_id))
             seq += 1
 
+    print(f"\n{'='*62}\n  Saving Excel report for {len(excel_records)} merchants...")
     xlsx_path = _save_excel_report(excel_records, output_dir, now_wib)
 
     batch_new    = [(s, n, ls, jp, xid) for s, n, ls, jp, bt, xid in batch_records if bt == "xlsx-new"]
     batch_update = [(s, n, ls, jp, xid) for s, n, ls, jp, bt, xid in batch_records if bt == "xlsx-update"]
     batch_delete = [(s, n, ls, jp, xid) for s, n, ls, jp, bt, xid in batch_records if bt == "xlsx-delete"]
+
+    print(f"\n{'='*62}\n  Saving batch Excel report for {(batch_records)} merchants...")
     realtime_records, seq = _generate_realtime_records(output_dir, seq, now_wib)
     if batch_new or batch_update or batch_delete or realtime_records:
         batch_path = _save_batch_excel_report(
@@ -2004,8 +2085,8 @@ def main() -> None:
                 print(f"      Already up to date (last date: {append_start - timedelta(days=1)}).")
                 conn.close()
                 return
-            print("\nGenerating merchant activity report...")
-            generate_merchant_status_report(conn, load_merchants_from_db(conn, csv_rows))
+            # print("\nGenerating merchant activity report...")
+            # generate_merchant_status_report(conn, load_merchants_from_db(conn, csv_rows))
             conn.close()
             return
 
@@ -2026,8 +2107,8 @@ def main() -> None:
                 n = cur.fetchone()[0]
                 print(f"      {table:<22} {n:>10,}")
 
-        print("\nGenerating merchant activity report...")
-        generate_merchant_status_report(conn, merchants_info)
+        # print("\nGenerating merchant activity report...")
+        # generate_merchant_status_report(conn, merchants_info)
         conn.close()
         return
 
@@ -2055,6 +2136,8 @@ def main() -> None:
         print("[2/2] Loading merchants from DB...")
         merchants_info = load_merchants_from_db(conn, csv_rows)
         input_refs = {r.get("_xlsx_id", "").strip() for r in csv_rows if r.get("_xlsx_id", "").strip()}
+
+        print(f"      {(input_refs)} unique input references found in CSV.")
         merchants_info = [m for m in merchants_info if m.get("reference") in input_refs]
         print(f"      {len(merchants_info)} merchants matched to input files.")
 
@@ -2064,11 +2147,11 @@ def main() -> None:
         return
 
     if add_merchants_mode:
-        print("[1/6] Loading list_edc.csv...")
+        print("[1/5] Loading list_edc.csv...")
         csv_rows = _load_all_csv_rows()
         print(f"      {len(csv_rows)} rows loaded.")
 
-        print("[2/6] Identifying new merchants...")
+        print("[2/5] Identifying new merchants...")
         new_rows = filter_new_csv_rows(conn, csv_rows)
         if not new_rows:
             print("      No new merchants found — DB is already up to date.")
@@ -2080,18 +2163,18 @@ def main() -> None:
         idx_offset = get_merchant_idx_offset(conn)
         print(f"      Sequence offset: {idx_offset}")
 
-        print("[3/6] Inserting admin areas (idempotent)...")
+        print("[3/5] Inserting admin areas (idempotent)...")
         acquirer_ids    = load_acquirers(conn)
         qris_issuer_ids = load_qris_issuers(conn)
         area_map = insert_admin_areas(conn, new_rows)
 
-        print("[4/6] Inserting new merchants + terminals...")
+        print("[4/5] Inserting new merchants + terminals...")
         new_merchants_info = insert_merchants_and_terminals(
             conn, new_rows, acquirer_ids, area_map, idx_offset=idx_offset
         )
         print(f"      {len(new_merchants_info)} merchants and terminals inserted.")
 
-        print("[5/6] Loading cards + generating transactions for new merchants...")
+        print("[5/5] Loading cards + generating transactions for new merchants...")
         card_ids = load_cards_from_db(conn)
         reset_trace_seq(conn)
         generate_and_insert_transactions(
@@ -2106,9 +2189,9 @@ def main() -> None:
                 n = cur.fetchone()[0]
                 print(f"      {table:<22} {n:>10,}")
 
-        print("[6/6] Generating report (all merchants)...")
-        all_merchants_info = load_merchants_from_db(conn, csv_rows)
-        generate_merchant_status_report(conn, all_merchants_info)
+        # print("[6/6] Generating report (all merchants)...")
+        # all_merchants_info = load_merchants_from_db(conn, csv_rows)
+        # generate_merchant_status_report(conn, all_merchants_info)
         conn.close()
         return
 
@@ -2169,8 +2252,8 @@ def main() -> None:
             n = cur.fetchone()[0]
             print(f"      {table:<22} {n:>10,}")
 
-    print("\n[8/8] Merchant activity report...")
-    generate_merchant_status_report(conn, merchants_info)
+    # print("\n[8/8] Merchant activity report...")
+    # generate_merchant_status_report(conn, merchants_info)
 
     conn.close()
     print("Done.")
