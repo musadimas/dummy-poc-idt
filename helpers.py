@@ -249,10 +249,40 @@ def _read_unified_csv(path: Path) -> list[dict]:
                     _sig_m, _sig_sec = divmod(_sig_rem, 60)
                     last_signal_str = datetime(_today.year, _today.month, _today.day,
                                                _sig_h, _sig_m, _sig_sec).strftime("%Y-%m-%d %H:%M:%S")
+                elif category in REALTIME_CATEGORY_SET and status in ("new", "update"):
+                    # ATM / Bank / infrastructure POIs have no EDC terminal — treat as realtime
+                    batch_type_tag = "xlsx-realtime"
+                    _today = date.today()
+                    _wd    = _today.weekday()
+                    _win   = (sched_override or {}).get(_wd)
+                    if _win and _win[0] and _win[1]:
+                        _open_s  = _win[0].hour * 3600 + _win[0].minute * 60
+                        _close_s = _win[1].hour * 3600 + _win[1].minute * 60
+                        _sig_s   = random.randint(_open_s, _close_s - 1) if _close_s > _open_s else _open_s
+                    else:
+                        _sig_s = random.randint(8 * 3600, 22 * 3600 - 1)
+                    _sig_h, _sig_rem = divmod(_sig_s, 3600)
+                    _sig_m, _sig_sec = divmod(_sig_rem, 60)
+                    last_signal_str = datetime(_today.year, _today.month, _today.day,
+                                               _sig_h, _sig_m, _sig_sec).strftime("%Y-%m-%d %H:%M:%S")
+                elif category in REALTIME_CATEGORY_SET and status == "delete":
+                    # Inactive realtime: use closure date as the last known signal
+                    batch_type_tag = "xlsx-realtime"
+                    _cf = closed_from_str or date.today().isoformat()
+                    try:
+                        _cf_date = date.fromisoformat(_cf)
+                    except ValueError:
+                        _cf_date = date.today()
+                    _sig_s = random.randint(8 * 3600, 16 * 3600)
+                    _sig_h, _sig_rem = divmod(_sig_s, 3600)
+                    _sig_m, _sig_sec = divmod(_sig_rem, 60)
+                    last_signal_str = datetime(_cf_date.year, _cf_date.month, _cf_date.day,
+                                               _sig_h, _sig_m, _sig_sec).strftime("%Y-%m-%d %H:%M:%S")
 
                 if not name:
                     continue
 
+                _merchant_status = "INACTIVE" if status == "delete" else "ACTIVE"
                 result.append({
                     "name1":              name,
                     "displaylatitude":    lat,
@@ -274,7 +304,7 @@ def _read_unified_csv(path: Path) -> list[dict]:
                     "closed_from":        closed_from_str,
                     "batch_type":         batch_type_tag,
                     "last_signal":        last_signal_str,
-                    "status":             "ACTIVE",
+                    "status":             _merchant_status,
                 })
     except Exception as exc:
         print(f"      [unified-csv] Cannot read {path.name}: {exc}")
